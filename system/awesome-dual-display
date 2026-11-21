@@ -1,0 +1,107 @@
+#!/bin/bash
+# Session entry point for awesome on this laptop.
+#
+# NVIDIA is the primary GPU of X screen 0 (see
+# /usr/share/X11/xorg.conf.d/05-nvidia-primary.conf, OutputClass
+# PrimaryGPU), so the external HDMI output (HDMI-0) is native to screen 0
+# and the internal panel (eDP-1-1) hangs off the Intel GPU.  The two only
+# become one X screen when the Intel (modesetting) provider is slaved to
+# the NVIDIA master via PRIME output slaving, which has to happen before
+# awesome enumerates screens - otherwise awesome only sees the external
+# panel.  With both outputs in place, awesome (RandR 1.5) gives each one
+# its own tag list and wibar.
+#
+# Output names are detected from xrandr rather than hardcoded: internal is
+# the first connected eDP* output, external the first connected HDMI*
+# output.  EXTERNAL_MODE/EXTERNAL_RATE pin the external panel's mode; leave
+# EXTERNAL_MODE empty to apply --auto (the display's preferred mode).
+
+EXTERNAL_MODE=1680x1050
+EXTERNAL_RATE=59.95
+LOG="$HOME/.cache/awesome-display.log"
+
+mkdir -p "$(dirname "$LOG")"
+
+# Provider name as reported by the driver, e.g. "NVIDIA-0".  Resolved rather
+# than hardcoded so a driver change cannot silently break the layout.
+provider_named() {
+    xrandr --listproviders | sed -n "s/.*name:\(.*\)$/\1/p" | grep -i "$1" | head -1
+}
+
+# First connected output whose name starts with the given prefix,
+# e.g. output_connected eDP -> eDP-1-1.  Resolved rather than hardcoded so a
+# driver change cannot silently break the layout.
+output_connected() {
+    xrandr --query | sed -n "s/^\\($1[^ ]*\\) connected .*/\\1/p" | head -1
+}
+
+{
+    echo "=== $(date -Is) starting awesome session ==="
+
+    NVIDIA=$(provider_named nvidia)
+    MODESET=$(provider_named modesetting)
+    echo "providers: nvidia='${NVIDIA}' modesetting='${MODESET}'"
+    xrandr --listproviders
+
+    if [ -n "$NVIDIA" ] && [ -n "$MODESET" ]; then
+        # nvidia-primary layout: slave the Intel (modesetting) provider to
+        # the NVIDIA master so its outputs (the internal panel) join
+        # screen 0.  The old reverse-PRIME direction ("$NVIDIA" "$MODESET")
+        # is wrong here and fails silently: NVIDIA has no Sink Output cap.
+        xrandr --setprovideroutputsource "$MODESET" "$NVIDIA"
+    else
+        echo "cannot identify both providers; skipping PRIME output slaving"
+    fi
+
+    INTERNAL=$(output_connected eDP)
+    EXTERNAL=$(output_connected HDMI)
+    echo "outputs: internal='${INTERNAL}' external='${EXTERNAL}'"
+
+    if [ -z "$INTERNAL" ]; then
+        echo "no connected internal (eDP*) output found; not applying layout"
+    else
+        # Provider outputs appear asynchronously; wait up to 2s for the HDMI
+        # output to show up (the full wait only happens when nothing is
+        # plugged in).
+        for _ in $(seq 1 20); do
+            [ -n "$EXTERNAL" ] && break
+            EXTERNAL=$(output_connected HDMI)
+            sleep 0.1
+        done
+
+        if [ -n "$EXTERNAL" ]; then
+            echo "external display found, applying dual-head layout"
+            MODE_ARGS=(--auto)
+            if [ -n "$EXTERNAL_MODE" ]; then
+                MODE_ARGS=(--mode "$EXTERNAL_MODE")
+                [ -n "$EXTERNAL_RATE" ] && MODE_ARGS+=(--rate "$EXTERNAL_RATE")
+            fi
+            xrandr --output "$INTERNAL" --primary --auto \
+                   --output "$EXTERNAL" "${MODE_ARGS[@]}" --right-of "$INTERNAL"
+        else
+            echo "external display not available, using internal panel only"
+            xrandr --output "$INTERNAL" --primary --auto
+        fi
+    fi
+
+    echo "=== final layout ==="
+    xrandr --query
+} >>"$LOG" 2>&1
+
+# Session environment.  GDM sets DESKTOP_SESSION/XDG_SESSION_DESKTOP from the
+# desktop-file name, but XDG_SESSION_TYPE/XDG_CURRENT_DESKTOP are inherited
+# from the systemd user manager, which keeps stale values from an earlier
+# GNOME login (notably XDG_SESSION_TYPE=wayland).  Chromium-based apps pick
+# their ozone platform from that, so export the real X11 values and push them
+# into the systemd manager and D-Bus activation environment.
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=awesome
+export DESKTOP_SESSION=awesome-dual
+export XDG_SESSION_DESKTOP=awesome-dual
+
+systemctl --user set-environment \
+    XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DESKTOP_SESSION XDG_SESSION_DESKTOP DISPLAY 2>>"$LOG"
+dbus-update-activation-environment --systemd \
+    XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DESKTOP_SESSION XDG_SESSION_DESKTOP DISPLAY 2>>"$LOG"
+
+exec awesome

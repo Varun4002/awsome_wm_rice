@@ -1,0 +1,5 @@
+# Runtime byproducts only. No generated images are stored here; caches live in
+# ~/.cache/awesome-wallpaper* (see docs/00-audit.md).
+*.log
+*.bak
+*.orig
