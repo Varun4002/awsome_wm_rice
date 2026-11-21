@@ -2,17 +2,23 @@
 -- launchers.lua — placement authority for the GTK launchers
 --
 -- Starlight (Alt+Space) and Launchpad (Mod4+e) are GTK4 toplevels. GTK maps
--- them at a preliminary size and then resizes them with a ConfigureRequest
+-- them at a preliminary geometry and then resizes them with a ConfigureRequest
 -- that also carries position (0,0); Awesome honours that position for floating
 -- clients. Rule-time placement therefore always loses (docs/03-defects.md, D1).
 --
 -- This module is the single placement authority:
 --   * records the screen a keybinding fired on (the window rule reads it),
---   * keeps the window transparent until it sits in its final place,
---   * waits for the post-map size to stabilise, centres once using that
---     screen's work area, restores opacity, and detaches.
+--   * centres the client at manage time and after every size change,
+--   * keeps the client invisible until its size has been stable for a moment,
+--     so the first painted frame is already centred,
+--   * reveals it once, then detaches. No rule callbacks, no repeated reveal.
 --
--- No rule callbacks and no repeated placement.
+-- glass.lua must not touch a client's opacity while placement is pending; it
+-- checks the _aether_placement_pending marker this module sets (D10).
+--
+-- The reveal waits for *size* stability, not for size hints: GTK4 only
+-- publishes min == max after the WM has already resized the window, so
+-- waiting for hints costs a fixed 350 ms (D4, docs/03-defects.md).
 --------------------------------------------------------------------------
 
 local awful = require("awful")
@@ -22,18 +28,15 @@ local M = {}
 
 local CLASSES = { starlight = true, launchpad = true }
 
--- Hide a launcher until it is centred: GTK's first frames are at the wrong
--- size/position and would otherwise be visible as a jump.
-local HIDE_UNTIL_PLACED = true
+-- A remembered screen stays valid this long after the keybinding. It is
+-- consumed by the next manage of that class, so the TTL only matters for a
+-- launcher started by hand (no keybinding) while a stale entry exists.
+local SCREEN_TTL = 5
 
--- A remembered screen stays valid for this long after the keybinding.
-local SCREEN_TTL = 2
+local SETTLE_DELAY = 0.08 -- reveal once the size has been stable this long
+local HARD_TIMEOUT = 0.50 -- ... but never hold a launcher longer than this
 
-local SETTLE_DELAY = 0.02 -- let a second ConfigureRequest land
-local HINT_WAIT    = 0.35 -- first chance to place once size hints are final
-local HARD_TIMEOUT = 1.2  -- place regardless of hints
-
--- [class] = { screen = <screen>, at = <epoch seconds> }
+-- [class] = { screen = <screen>, at = <os.time()> }
 local target = {}
 
 --- Spawn a launcher on the screen the pointer is on right now.
@@ -51,73 +54,126 @@ function M.screen_for(class)
     return mouse.screen.index
 end
 
-local function center(c, scr)
-    local wa = scr.workarea
-    c:geometry {
-        x = wa.x + math.floor((wa.width - c.width) / 2),
-        y = wa.y + math.floor((wa.height - c.height) / 2),
-    }
+-- Consume the remembered screen for a class. Called from the manage handler,
+-- after rules have read it, so a later manual launch cannot inherit it.
+local function take_screen(class)
+    local t = target[class]
+    target[class] = nil
+    if t and (os.time() - t.at) <= SCREEN_TTL then
+        return t.screen
+    end
+    return nil
 end
 
---- True when the client is at the size its own hints declare as final.
---  These launchers are non-resizable, so GTK publishes min == max; matching it
---  is a reliable signal that no further ConfigureRequest is coming.
-local function at_final_size(c)
-    local sh = c.size_hints
-    return sh and sh.max_width and sh.max_height
-        and c.width == sh.max_width and c.height == sh.max_height
+local function target_position(c, scr)
+    local wa = scr.workarea
+    return wa.x + math.floor((wa.width - c.width) / 2),
+           wa.y + math.floor((wa.height - c.height) / 2)
+end
+
+local function center(c, scr)
+    if c.width <= 1 or c.height <= 1 then
+        return
+    end
+    local x, y = target_position(c, scr)
+    if c.x ~= x or c.y ~= y then
+        c:geometry{ x = x, y = y }
+    end
 end
 
 local function place_when_ready(c, scr)
     local placed = false
-    local on_geometry
+    local applying = false -- ignore geometry events caused by our own move
+    local last_w, last_h = c.width, c.height
+    local finish, on_geometry -- forward declarations
 
-    local function place()
+    local reveal_timer = gears.timer{
+        timeout = SETTLE_DELAY,
+        single_shot = true,
+        callback = function()
+            finish()
+        end,
+    }
+
+    finish = function()
         if placed or not c.valid then
-            return
-        end
-        if c.width <= 1 or c.height <= 1 then
             return
         end
         placed = true
-        c:disconnect_signal("property::geometry", on_geometry)
+        reveal_timer:stop()
 
-        -- The client's own (0,0) ConfigureRequest can move it across monitors,
-        -- and awesome then re-homes it to the screen under that position.
-        -- Undo that: the screen chosen when the keybinding fired wins.
+        -- The client's own (0,0) ConfigureRequest can move it across
+        -- monitors and awesome then re-homes it to the screen under that
+        -- position. Undo that: the screen chosen at spawn time wins.
         if c.screen ~= scr then
             c.screen = scr
         end
-
+        applying = true
         center(c, scr)
+        applying = false
+
+        c._aether_placement_pending = nil
         c.opacity = 1
     end
 
+    -- Kept connected for the client's lifetime: GTK can send another
+    -- ConfigureRequest after the reveal (late async results, theme changes),
+    -- and a launcher must never end up off-centre. Position-only requests are
+    -- corrected immediately; size changes only schedule the one-time reveal.
     on_geometry = function()
-        if placed or not c.valid then
+        if applying or not c.valid then
             return
         end
-        gears.timer.start_new(SETTLE_DELAY, function ()
-            if at_final_size(c) then
-                place()
-            end
-            return false
-        end)
+        -- A ConfigureRequest can arrive without a size change (GTK sends
+        -- (0,0)); keep the window centred regardless of who moved it.
+        applying = true
+        center(c, scr)
+        applying = false
+
+        if placed then
+            return
+        end
+        if c.width ~= last_w or c.height ~= last_h then
+            last_w, last_h = c.width, c.height
+            -- Restart the single timer: a burst of resizes results in one
+            -- reveal, 80 ms after the last size change.
+            reveal_timer:stop()
+            reveal_timer:start()
+        end
     end
+
+    -- Hide before the first frame is painted. glass.lua leaves the opacity
+    -- alone while the placement marker is set.
+    c._aether_placement_pending = true
+    c.opacity = 0
 
     c:connect_signal("property::geometry", on_geometry)
 
-    gears.timer.start_new(HINT_WAIT, function ()
-        if at_final_size(c) then
-            place()
-        end
-        return false
-    end)
+    -- Centre immediately with the size GTK mapped with. Launchpad's window
+    -- already maps at its final size, so its first visible frame is centred.
+    applying = true
+    center(c, scr)
+    applying = false
 
-    gears.timer.start_new(HARD_TIMEOUT, function ()
-        place()
+    reveal_timer:start()
+
+    gears.timer.start_new(HARD_TIMEOUT, function()
+        finish()
         return false
     end)
+end
+
+--- True while a launcher is managed on screen (including while it is still
+-- being placed). The launchers are modal overlays: the pointer must not move
+-- focus to a client underneath them, or the GTK app sees a blur and dismisses
+-- itself (D5).
+function M.has_open_launcher()
+    for _, c in ipairs(client.get()) do
+        if CLASSES[c.class] and c._aether_launcher_open and c:isvisible() then
+            return true
+        end
+    end
+    return false
 end
 
 --- Install the single manage handler. Safe to call more than once.
@@ -131,13 +187,13 @@ function M.install()
         if not CLASSES[c.class] then
             return
         end
-        -- Capture the screen the rule chose before GTK's post-map request can
-        -- move the client into a different monitor (see place()).
-        local scr = c.screen
-        if HIDE_UNTIL_PLACED then
-            c.opacity = 0
-        end
+        c._aether_launcher_open = true
+        local scr = take_screen(c.class) or c.screen
         place_when_ready(c, scr)
+    end)
+
+    client.connect_signal("unmanage", function (c)
+        c._aether_launcher_open = nil
     end)
 end
 

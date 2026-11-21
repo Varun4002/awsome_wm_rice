@@ -151,6 +151,11 @@ end
 
 local function apply_opacity(c)
     if not c.valid then return end
+    -- launchers.lua hides a launcher until it is centred and then reveals it.
+    -- A focus event arrives while that is still pending (awesome focuses the
+    -- client during manage), so without this guard the window would become
+    -- visible at GTK's preliminary position before being centred.
+    if c._aether_placement_pending then return end
     if cfg.opacity_exclude[c.class] then
         c.opacity = 1.0
         return

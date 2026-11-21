@@ -308,7 +308,12 @@ local function fullscreen_busy(s)
     return false
 end
 
-local reveal_timer = gears.timer{ timeout = 0.08, callback = function()
+-- Declared before the constructor: inside the callback `reveal_timer` must
+-- refer to this local. With a single `local reveal_timer = gears.timer{...}`
+-- the initializer cannot see the local, so the callback resolved the name to
+-- a global (nil) and raised an error every 80 ms.
+local reveal_timer
+reveal_timer = gears.timer{ timeout = 0.08, callback = function()
     local any_hidden = false
     local mc = mouse.coords()
     for s in screen do
@@ -780,8 +785,11 @@ client.connect_signal("request::titlebars", function(c)
     glass.titlebar(c)
 end)
 
--- Enable sloppy focus, so that focus follows mouse.
+-- Enable sloppy focus, so that focus follows mouse. The launchers are modal
+-- overlays: while one is open, crossing events caused by its own resize must
+-- not hand focus to a client underneath it (the GTK app would dismiss itself).
 client.connect_signal("mouse::enter", function(c)
+    if launchers.has_open_launcher() then return end
     c:emit_signal("request::activate", "mouse_enter", {raise = false})
 end)
 
