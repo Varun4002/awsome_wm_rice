@@ -14,11 +14,27 @@ local beautiful = require("beautiful")
 local naughty = require("naughty")
 local menubar = require("menubar")
 -- macOS frosted top bar (also provides song/volume/usage widgets)
+-- AETHER_RC_MARKER identifies the config generation currently loaded, so a
+-- reload can be verified from awesome-client (AETHER_RC_MARKER ~= nil).
+AETHER_RC_MARKER = "dot-v1"
+
 local frostbar = require("frostbar")
 -- Popover tween helper and the control-center popover (wifi/bt/brightness)
 local anim           = require("anim")
 local control_center = require("control_center")
 local hotkeys_popup = require("awful.hotkeys_popup")
+-- AETHER five-layer bar: design tokens, surface manager, layer modules and
+-- the OpenCode integration state (see docs/06-five-layer-bar.md).
+local ui          = require("ui")
+local popover     = require("popover")
+local workspaces  = require("workspaces")
+local windower    = require("windower")
+local dotws       = require("dotworkspace")
+local dragtransfer = require("dragtransfer")
+local clock       = require("clock")
+local opencode    = require("opencode")
+local opencode_ui = require("opencode_ui")
+local panel       = require("panel")
 -- Enable hotkeys help widget for VIM and other apps
 -- when client with a matching name is opened:
 require("awful.hotkeys_popup.keys")
@@ -139,60 +155,45 @@ else
 end
 
 
-mylauncher = awful.widget.launcher({ image = beautiful.awesome_icon,
-                                     menu = mymainmenu })
+-- The AETHER mark in the bar replaces the old awesome-icon launcher: left
+-- click opens the expanded panel, right click still opens this menu.
 
 -- Menubar configuration
 menubar.utils.terminal = terminal -- Set the terminal for applications that require it
 -- }}}
 
--- Keyboard map indicator and switcher
-mykeyboardlayout = awful.widget.keyboardlayout()
-
 -- {{{ Wibar
--- Create a textclock widget
-mytextclock = wibox.widget.textclock()
-mytextclock.font = "Inter Medium 10"
+-- AETHER's five-layer bar.  Layer 1 (the ambient bar) is assembled here;
+-- layers 2-4 are owned by their modules and anchored to these widgets;
+-- layer 5 is the signal wiring (windower/opencode subscriptions plus the
+-- autohide rule below).  Every widget that holds state is created once per
+-- screen: a wibox widget cannot belong to two bar hierarchies.
 
--- Create a wibox for each screen and add it
-local taglist_buttons = gears.table.join(
-                    awful.button({ }, 1, function(t) t:view_only() end),
-                    awful.button({ modkey }, 1, function(t)
-                                              if client.focus then
-                                                  client.focus:move_to_tag(t)
-                                              end
-                                          end),
-                    awful.button({ }, 3, awful.tag.viewtoggle),
-                    awful.button({ modkey }, 3, function(t)
-                                              if client.focus then
-                                                  client.focus:toggle_tag(t)
-                                              end
-                                          end),
-                    awful.button({ }, 4, function(t) awful.tag.viewnext(t.screen) end),
-                    awful.button({ }, 5, function(t) awful.tag.viewprev(t.screen) end)
-                )
+local function aether_mark()
+    local label = ui.text{ font = ui.font.mark }
+    ui.set_text(label, "AETHER", ui.color.text_dim, ui.font.mark)
 
-local tasklist_buttons = gears.table.join(
-                     awful.button({ }, 1, function (c)
-                                              if c == client.focus then
-                                                  c.minimized = true
-                                              else
-                                                  c:emit_signal(
-                                                      "request::activate",
-                                                      "tasklist",
-                                                      {raise = true}
-                                                  )
-                                              end
-                                          end),
-                     awful.button({ }, 3, function()
-                                              awful.menu.client_list({ theme = { width = 250 } })
-                                          end),
-                     awful.button({ }, 4, function ()
-                                              awful.client.focus.byidx(1)
-                                          end),
-                     awful.button({ }, 5, function ()
-                                              awful.client.focus.byidx(-1)
-                                          end))
+    local root = wibox.container.background()
+    root.shape = gears.shape.rounded_rect
+    root.bg = "#00000000"
+    root.forced_height = 28
+    root.widget = wibox.container.place(ui.pad(wibox.widget{
+        { ui.dot(ui.color.accent, 5), right = 8, widget = wibox.container.margin },
+        label,
+        layout = wibox.layout.fixed.horizontal,
+    }, 7, 10, 0, 0))
+
+    ui.hover(root, function() return "#00000000" end, ui.color.hover,
+        function() ui.set_text(label, "AETHER", ui.color.text, ui.font.mark) end,
+        function() ui.set_text(label, "AETHER", ui.color.text_dim, ui.font.mark) end)
+
+    -- Left click: the expanded intelligence panel (layer 4).  Right click:
+    -- the existing main menu, so the awesome menu is still one gesture away.
+    root:buttons(gears.table.join(
+        awful.button({}, 1, function() panel.toggle() end),
+        awful.button({}, 3, function() mymainmenu:toggle() end)))
+    return root
+end
 
 local function set_wallpaper(s)
     -- Wallpaper
@@ -213,8 +214,19 @@ awful.screen.connect_for_each_screen(function(s)
     -- Wallpaper
     set_wallpaper(s)
 
-    -- Each screen has its own tag table.
-    awful.tag({ "1", "2", "3", "4", "5", "6", "7", "8", "9" }, s, awful.layout.layouts[1])
+    -- Each screen has its own tag table, led by the "." wallpaper showcase
+    -- (see dotworkspace.lua).  The prepended dot shifts positional indexes,
+    -- so tags are resolved BY NAME everywhere (dotws.numbered), never by
+    -- raw index.  ensure_tags is idempotent: the setup callback can re-run
+    -- for a re-enumerated screen and awful.tag only appends.
+    local fresh = #s.tags == 0
+    dotws.ensure_tags(s)
+    -- A fresh screen boots onto the ordinary desktop; the dot is a
+    -- deliberate destination, never a startup default.
+    if fresh or #s.selected_tags == 0 then
+        local boot = dotws.numbered(s, 1)
+        if boot then boot:view_only() end
+    end
 
     -- Create a promptbox for each screen
     s.mypromptbox = awful.widget.prompt()
@@ -226,19 +238,10 @@ awful.screen.connect_for_each_screen(function(s)
                            awful.button({ }, 3, function () awful.layout.inc(-1) end),
                            awful.button({ }, 4, function () awful.layout.inc( 1) end),
                            awful.button({ }, 5, function () awful.layout.inc(-1) end)))
-    -- Create a taglist widget
-    s.mytaglist = awful.widget.taglist {
-        screen  = s,
-        filter  = awful.widget.taglist.filter.all,
-        buttons = taglist_buttons
-    }
 
-    -- Create a tasklist widget
-    s.mytasklist = awful.widget.tasklist {
-        screen  = s,
-        filter  = awful.widget.tasklist.filter.currenttags,
-        buttons = tasklist_buttons
-    }
+    -- Keyboard layout indicator: one instance per bar (a widget cannot be
+    -- shared between two hierarchies).
+    local keyboardlayout = awful.widget.keyboardlayout()
 
     -- Create the wibox
     -- height must be passed in the constructor: the wibar's attached
@@ -247,35 +250,44 @@ awful.screen.connect_for_each_screen(function(s)
     -- (fullscreen and _NET_WM_STATE_ABOVE included), so the bar cannot be
     -- covered by clients or by the cycler's desktop wibox (stack.c:
     -- stack_refresh).
-    s.mywibox = awful.wibar({ position = "top", screen = s, height = 30, ontop = true })
+    s.mywibox = awful.wibar({ position = "top", screen = s, height = ui.bar_height, ontop = true })
     -- Matches the frost fallback color; the frost widget paints over the
     -- bar background, but the systray's embedded X window uses this color.
     s.mywibox.bg = "#0e0e10"
 
-    -- Add widgets to the wibox
+    -- Layer 1 assembly.  The centre slot of align.horizontal is centred on
+    -- the whole bar width, so the active-window block stays optically
+    -- centred while the side clusters grow and shrink.
     s.mywibox:setup {
         layout = wibox.layout.align.horizontal,
-        { -- Left widgets
+        { -- Left: identity, workspaces, prompt
             layout = wibox.layout.fixed.horizontal,
-            mylauncher,
-            s.mytaglist,
+            aether_mark(),
+            workspaces.widget(s),
             s.mypromptbox,
         },
-        { -- Middle: now-playing centered (macOS style), tasklist beside it
-            layout = wibox.layout.align.horizontal,
-            nil,
-            frostbar.song,
-            s.mytasklist,
+        { -- Centre: the screen's active window (layer 1-3 anchor)
+            layout = wibox.container.place,
+            windower.widget(s),
+            halign = "center",
+            valign = "center",
         },
-        { -- Right widgets
+        { -- Right: media · OpenCode | audio | keyboard · layout · tray |
+          -- controls | clock.  Thin rules separate the functional groups so
+          -- the cluster reads as one interface instead of a pile of glyphs.
             layout = wibox.layout.fixed.horizontal,
-            frostbar.volume,
-            frostbar.usage,
-            mykeyboardlayout,
+            frostbar.new_song(),
+            opencode_ui.bar_widget(s),
+            ui.pad(ui.vrule(16), 8, 8, 0, 0),
+            frostbar.new_volume(),
+            ui.pad(ui.vrule(16), 8, 8, 0, 0),
+            ui.pad(keyboardlayout, 0, 6, 0, 0),
+            ui.pad(s.mylayoutbox, 0, 4, 0, 0),
             wibox.widget.systray(),
-            control_center.button,
-            mytextclock,
-            s.mylayoutbox,
+            ui.pad(ui.vrule(16), 8, 8, 0, 0),
+            control_center.new_button(),
+            ui.pad(ui.vrule(16), 8, 8, 0, 0),
+            clock.widget(),
         },
     }
 
@@ -342,8 +354,10 @@ local function update_bars()
         if not b then goto continue end
         if fullscreen_busy(s) then
             if b.visible then
-                control_center.close()
-                frostbar.close_media()
+                -- Every AETHER layer (contextual reveals, control surface,
+                -- panel, OpenCode, control center, media) is owned by the
+                -- surface manager, so one call takes the whole bar UI away.
+                popover.close_all()
                 b.visible = false
                 b.opacity = 1
                 s._bar_hidden = true
@@ -384,12 +398,25 @@ local brave_screen
 globalkeys = gears.table.join(
     awful.key({ modkey,           }, "s",      hotkeys_popup.show_help,
               {description="show help", group="awesome"}),
+    -- Expanded AETHER panel (layer 4); the AETHER mark in the bar toggles
+    -- the same surface on the screen under the pointer.
+    awful.key({ modkey,           }, "a", function() panel.toggle() end,
+              {description="toggle AETHER panel", group="awesome"}),
     awful.key({ modkey,           }, "Left",   awful.tag.viewprev,
               {description = "view previous", group = "tag"}),
     awful.key({ modkey,           }, "Right",  awful.tag.viewnext,
               {description = "view next", group = "tag"}),
     awful.key({ modkey,           }, "Escape", awful.tag.history.restore,
               {description = "go back", group = "tag"}),
+
+    -- Super+D: the dot wallpaper showcase ("show desktop"), screen-local.
+    awful.key({ modkey,           }, "d",
+        function ()
+            local s = awful.screen.focused()
+            local dot = dotws.dot_tag(s)
+            if dot then dot:view_only() end
+        end,
+        {description = "dot wallpaper showcase", group = "tag"}),
 
     awful.key({ modkey,           }, "j",
         function ()
@@ -417,12 +444,18 @@ globalkeys = gears.table.join(
               {description = "focus the previous screen", group = "screen"}),
     awful.key({ modkey,           }, "u", awful.client.urgent.jumpto,
               {description = "jump to urgent client", group = "client"}),
-    -- Tags are per-screen in awesome, so this cycles the focused monitor only.
+    -- Tags are per-screen in awesome, so this cycles the focused monitor
+    -- only.  During a window drag the press is consumed by the drag
+    -- handler instead: the dragged window transfers to the other monitor
+    -- (dragtransfer.lua).  Cycle order is forward through the tag array:
+    -- ". -> 1 -> ... -> 9 -> ."
     awful.key({ modkey,           }, "Tab",
         function ()
-            awful.tag.viewnext(awful.screen.focused())
+            if not dragtransfer.on_super_tab() then
+                awful.tag.viewnext(awful.screen.focused())
+            end
         end,
-        {description = "next tag on this screen", group = "tag"}),
+        {description = "next tag on this screen / transfer dragged window", group = "tag"}),
 
     -- Standard program
     awful.key({ modkey,           }, "Return", function () awful.spawn(terminal) end,
@@ -552,13 +585,20 @@ clientkeys = gears.table.join(
 -- Bind all key numbers to tags.
 -- Be careful: we use keycodes to make it work on any keyboard layout.
 -- This should map on the top row of your keyboard, usually 1 to 9.
+-- Tags are resolved by name (dotworkspace.numbered): the leading "." tag
+-- shifts positional indexes, and these bindings must keep meaning the
+-- NUMBERED workspaces.
+local function numbered_tag(scr, i)
+    return dotws.numbered(scr, i)
+end
+
 for i = 1, 9 do
     globalkeys = gears.table.join(globalkeys,
         -- View tag only.
         awful.key({ modkey }, "#" .. i + 9,
                   function ()
                         local screen = awful.screen.focused()
-                        local tag = screen.tags[i]
+                        local tag = numbered_tag(screen, i)
                         if tag then
                            tag:view_only()
                         end
@@ -568,7 +608,7 @@ for i = 1, 9 do
         awful.key({ modkey, "Control" }, "#" .. i + 9,
                   function ()
                       local screen = awful.screen.focused()
-                      local tag = screen.tags[i]
+                      local tag = numbered_tag(screen, i)
                       if tag then
                          awful.tag.viewtoggle(tag)
                       end
@@ -578,7 +618,7 @@ for i = 1, 9 do
         awful.key({ modkey, "Shift" }, "#" .. i + 9,
                   function ()
                       if client.focus then
-                          local tag = client.focus.screen.tags[i]
+                          local tag = numbered_tag(client.focus.screen, i)
                           if tag then
                               client.focus:move_to_tag(tag)
                           end
@@ -589,7 +629,7 @@ for i = 1, 9 do
         awful.key({ modkey, "Control", "Shift" }, "#" .. i + 9,
                   function ()
                       if client.focus then
-                          local tag = client.focus.screen.tags[i]
+                          local tag = numbered_tag(client.focus.screen, i)
                           if tag then
                               client.focus:toggle_tag(tag)
                           end
@@ -615,6 +655,26 @@ clientbuttons = gears.table.join(
 
 -- Set keys
 root.keys(globalkeys)
+
+-- Escape dismisses the active AETHER surface (panel, window controls,
+-- OpenCode, clock, control center, media).  The key is grabbed *only* while
+-- a modal surface is open: plain Escape must keep reaching applications,
+-- so it is never a permanent global binding.  The grab table is captured at
+-- open time, which preserves the late-registered launcher bindings.
+local modal_escape = awful.key({}, "Escape", function()
+    popover.close_all()
+end, {description="dismiss AETHER surface", group="awesome"})
+
+local keys_before_modal
+popover.subscribe(function(_, modal)
+    if modal and not keys_before_modal then
+        keys_before_modal = root.keys()
+        root.keys(gears.table.join(keys_before_modal, modal_escape))
+    elseif not modal and keys_before_modal then
+        root.keys(keys_before_modal)
+        keys_before_modal = nil
+    end
+end)
 
 -- Launchers: Starlight search (Alt+Space) and Launchpad (Mod4+e). Placement is
 -- owned by launchers.lua — the GTK clients map at a preliminary size and send a
@@ -765,6 +825,23 @@ awful.rules.rules = {
 -- client already belongs to the right screen when the settle timer starts.
 launchers.install()
 
+-- The dot workspace's routing policy and the drag-aware Super+Tab both hook
+-- client/tag signals; installing after the rules keeps them behind the
+-- launcher placement authority in the manage chain.
+dotws.install()
+dragtransfer.install()
+
+-- Restart races: the screen setup callback can fire again mid-restart after
+-- Xinerama re-detects, appending a stray tag set after the clean one above.
+-- One deferred pass enforces the canonical set again once clients have
+-- re-managed (fast no-op when nothing raced).
+gears.timer.start_new(2.5, function()
+    for s in screen do
+        if s.valid then dotws.ensure_tags(s) end
+    end
+    return false
+end)
+
 -- {{{ Signals
 -- Signal function to execute when a new client appears.
 client.connect_signal("manage", function (c)
@@ -804,3 +881,9 @@ wallpaper_cycler.setup{ directory = os.getenv("HOME") .. "/wallpapers" }
 -- supplies the background blur and shadows too.  glass.lua starts it once
 -- (never a second instance) and respawns it if it crashes.
 glass.start_compositor()
+
+-- OpenCode integration: capability probe then the first poll.  Nothing
+-- blocks; a service that starts after awesome is picked up by the adaptive
+-- poll, and a service that restarts is re-discovered from its service file
+-- on the next tick without an AwesomeWM restart.
+opencode.start()

@@ -1,64 +1,78 @@
 --------------------------------------------------------------------------
--- control_center.lua — macOS-style control-center popover for the top bar
+-- control_center.lua — the system control surface of the AETHER bar
 --
--- A pill button in the bar's right section opens a popover with:
---   * Wi-Fi: on/off toggle (nmcli) + the current network name
---   * Bluetooth: on/off toggle (bluetoothctl) + power state
---   * Brightness: hardware backlight slider via brightnessctl. Setting
---     needs root, so changes go through `sudo -n` (passwordless on this
---     machine); reads are unprivileged.
+-- A pill button in the right cluster opens one glass popover with the
+-- toggles that should be one gesture away:
 --
--- All state reads are async forks — the main loop never blocks. Toggles
--- animate immediately (optimistic) and are re-synced from the tools' real
--- state; a poll that reports "unchanged" does not re-animate the switch.
+--   * Wi-Fi:            on/off (nmcli) + the active network name
+--   * Bluetooth:        on/off (bluetoothctl) + the paired devices, each
+--                       clickable to connect / disconnect
+--   * Dark mode:        GNOME colour scheme (gsettings), honoured by GTK4
+--                       and libadwaita applications
+--   * Brightness:       hardware backlight slider (brightnessctl via
+--                       passwordless sudo, see docs/03-defects.md D8)
+--   * Volume:           default sink slider + mute (wpctl)
+--
+-- Every read is one async fork of a single shell probe; the main loop never
+-- blocks.  Toggles animate optimistically and are re-synced from the tools'
+-- real state.  While the popover is open a 2.5 s refresh keeps devices and
+-- values honest; it stops on close.
 --------------------------------------------------------------------------
 
 local wibox = require("wibox")
 local awful = require("awful")
 local gears = require("gears")
 local anim  = require("anim")
+local ui    = require("ui")
+local popover_mgr = require("popover")
 
 local M = {}
 
-local FG_MAIN  = "#f2f2f7"
-local FG_MUTED = "#9a9aa0"
-local POPUP_BG = "#1c1c1f"
-local ON_BG    = "#30d158"
-local OFF_BG   = "#48484d"
+local FA_WIFI     = "\u{f1eb}"
+local FA_BT       = "\u{f293}"
+local FA_SUN      = "\u{f185}"
+local FA_MOON     = "\u{f186}"
+local FA_SLIDERS  = "\u{f1de}"
+local FA_VOL      = "\u{f028}"
+local FA_PANEL    = "\u{f108}"
 
-local FA_WIFI    = "\u{f1eb}"
-local FA_BT      = "\u{f293}"
-local FA_SUN     = "\u{f185}"
-local FA_SLIDERS = "\u{f1de}"
+local FA_VOL_MUTE = "\u{f026}"
 
-local function esc(s)
-    return (tostring(s):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
-end
+local PROBE = [[
+echo "W $(nmcli -t -f WIFI radio 2>/dev/null || echo unavailable)"
+echo "S $(nmcli --escape=no -t -f NAME,TYPE connection show --active 2>/dev/null | grep 802-11-wireless | cut -d: -f1 | head -1)"
+echo "B $(bluetoothctl show 2>/dev/null | grep -m1 Powered: | grep -oE 'yes|no')"
+echo "L $(brightnessctl -m 2>/dev/null | cut -d, -f4)"
+echo "V $(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null || echo unavailable)"
+echo "K $(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || echo unavailable)"
+bluetoothctl devices Paired 2>/dev/null | sed 's/^Device \([^ ]*\) /P\t\1\t/'
+bluetoothctl devices Connected 2>/dev/null | sed 's/^Device \([^ ]*\) /C\t\1\t/'
+]]
 
--- Markup-setter that skips no-op writes (a textbox relayout for the same
--- string is wasted work in a widget that refreshes every few seconds).
+local state = {
+    wifi_on   = false,
+    wifi_name = nil,
+    wifi_available = true,
+    bt_on     = false,
+    bt_available = true,
+    devices   = {},          -- { mac, name, connected }
+    bright    = nil,         -- percent
+    volume    = nil,         -- percent
+    muted     = false,
+    dark      = false,
+}
+
+local refresh_timer -- 2.5 s while open (declared below)
+
+-------------------------------------------------------------------------- primitives
+
 local function set_markup(widget, str)
     if widget._private.cc_markup == str then return end
     widget._private.cc_markup = str
     widget:set_markup_silently(str)
 end
 
-local function markup(text, color, font)
-    return string.format('<span font="%s" foreground="%s">%s</span>',
-        font or "Inter Medium 10", color or FG_MAIN, esc(text))
-end
-
-local function icon_widget(glyph, size)
-    local i = wibox.widget.textbox()
-    i.font = "FontAwesome " .. (size or 11)
-    set_markup(i, string.format('<span foreground="%s">%s</span>', FG_MUTED, glyph))
-    return i
-end
-
---------------------------------------------------------------------------
--- macOS-style switch: rounded pill, knob slides with an ease-out tween.
---------------------------------------------------------------------------
-
+--- macOS-style switch: rounded pill, knob slides with an ease-out tween.
 local function make_switch(id, on_toggle)
     local checked = false
     local knob = wibox.widget{
@@ -71,12 +85,11 @@ local function make_switch(id, on_toggle)
         left = 2, right = 18, widget = wibox.container.margin,
     }
     local pill = wibox.widget{
-        slide, bg = OFF_BG, shape = gears.shape.rounded_bar,
+        slide, bg = ui.color.track, shape = gears.shape.rounded_bar,
         forced_width = 42, forced_height = 22,
         widget = wibox.container.background,
     }
 
-    -- Knob rests: off = margins 2/18, on = 22/2 (slides 20px across).
     local function set_knob(on)
         anim.tween{ tag = "cc_switch_" .. id, duration = 0.16,
             step = function(t)
@@ -88,7 +101,7 @@ local function make_switch(id, on_toggle)
     function pill:set_checked(b)
         local changed = checked ~= b
         checked = b
-        pill.bg = b and ON_BG or OFF_BG
+        pill.bg = b and ui.color.accent_bg_hi or ui.color.track
         if changed then set_knob(b) end
         return changed
     end
@@ -96,7 +109,7 @@ local function make_switch(id, on_toggle)
 
     pill:buttons(gears.table.join(awful.button({}, 1, function()
         checked = not checked
-        pill.bg = checked and ON_BG or OFF_BG
+        pill.bg = checked and ui.color.accent_bg_hi or ui.color.track
         set_knob(checked)
         if on_toggle then on_toggle(checked) end
     end)))
@@ -104,190 +117,374 @@ local function make_switch(id, on_toggle)
     return pill
 end
 
---------------------------------------------------------------------------
--- Rows. State reads are async; resync_soon() re-reads after a toggle so
--- the switch settles on the tool's real state even if the command failed.
---------------------------------------------------------------------------
+--- A full-width switch row: glyph, label (+ optional sub line), switch.
+local function switch_row(icon_glyph, label, sub, id, on_toggle)
+    local icon = ui.icon(icon_glyph, 11, ui.color.text_dim)
+    local main = ui.text{ font = ui.font.body, width = 190, ellipsize = "end" }
+    local subline = ui.text{ font = ui.font.tiny, width = 190, ellipsize = "end" }
 
-local wifi_label = wibox.widget.textbox()
-local bt_label   = wibox.widget.textbox()
-local bright_pct = wibox.widget.textbox()
-local resync_soon, refresh -- forward declarations (toggles capture them)
+    local switch = make_switch(id, on_toggle)
 
-local wifi_switch = make_switch("wifi", function(on)
-    awful.spawn.with_shell("nmcli radio wifi " .. (on and "on" or "off"))
-    resync_soon()
-end)
-local bt_switch = make_switch("bt", function(on)
-    awful.spawn.with_shell("bluetoothctl power " .. (on and "on" or "off"))
-    resync_soon()
-end)
+    local texts = wibox.layout.fixed.vertical()
+    texts.spacing = 0
+    texts:add(main)
+    texts:add(subline)
 
--- Brightness slider. Reads are unprivileged; writes need root, so each
--- change is `sudo -n brightnessctl`, throttled so a drag sends one command
--- per 250ms instead of one per frame.
-local bright_dragging, bright_syncing = false, false
-local pending_bright
-local bright_timer = gears.timer{ timeout = 0.25, single_shot = true, callback = function()
+    local row = wibox.container.background()
+    row.shape = gears.shape.rounded_rect
+    row.bg = "#00000000"
+    row.forced_height = sub and 40 or 34
+    row.widget = ui.pad(wibox.widget{
+        wibox.widget{
+            { icon, left = 2, right = 12, widget = wibox.container.margin },
+            texts,
+            layout = wibox.layout.fixed.horizontal,
+        },
+        nil,
+        { switch, left = 10, widget = wibox.container.margin },
+        layout = wibox.layout.align.horizontal,
+    }, 6, 6, 5, 5)
+
+    ui.hover(row, function() return "#00000000" end, ui.color.hover)
+
+    function row:set(main_text, sub_text, on)
+        ui.set_text(main, main_text, on and ui.color.text or ui.color.text_dim)
+        ui.set_text(subline, sub_text or "", sub_text and ui.color.text_faint or ui.color.text_faint)
+        switch:set_checked(on)
+    end
+
+    row:set(label, sub, false)
+    return row
+end
+
+--- Icon + label + trailing widget (slider rows, device rows).
+local function row(icon_glyph, label, trailing, height, on_hover)
+    local icon = ui.icon(icon_glyph, 11, ui.color.text_dim)
+    local main = ui.text{ font = ui.font.body, ellipsize = "end" }
+    ui.set_text(main, label, ui.color.text_dim)
+
+    local r = wibox.container.background()
+    r.shape = gears.shape.rounded_rect
+    r.bg = "#00000000"
+    r.forced_height = height or 30
+    r.widget = ui.pad(wibox.widget{
+        wibox.widget{
+            { icon, left = 2, right = 12, widget = wibox.container.margin },
+            main,
+            layout = wibox.layout.fixed.horizontal,
+        },
+        nil,
+        trailing,
+        layout = wibox.layout.align.horizontal,
+    }, 6, 6, 3, 3)
+    if on_hover then
+        ui.hover(r, function() return "#00000000" end, ui.color.hover)
+    end
+    r.label = main
+    r.icon = icon
+    return r
+end
+
+local function slider(min, max)
+    -- macOS-style composite: visible track + accent fill + round handle
+    -- (the stock 4.3 slider has no value fill and an invisible track).
+    return ui.slider{
+        minimum = min, maximum = max,
+        width = 150, height = 20, bar_height = 4,
+    }
+end
+
+-------------------------------------------------------------------------- rows
+
+local wifi_row, bt_row, dark_row
+local bright_slider, bright_pct
+local vol_slider, vol_pct, vol_icon
+local device_list
+
+local dragging, syncing = false, false
+local pending_bright, pending_vol
+local throttle = gears.timer{ timeout = 0.25, single_shot = true, callback = function()
     if pending_bright then
         awful.spawn.with_shell(
             string.format("sudo -n brightnessctl -q set %d%%", math.floor(pending_bright + 0.5)))
         pending_bright = nil
     end
+    if pending_vol then
+        awful.spawn.with_shell(
+            string.format("wpctl set-volume @DEFAULT_AUDIO_SINK@ %d%%", math.floor(pending_vol + 0.5)))
+        pending_vol = nil
+    end
 end }
-local bright = wibox.widget.slider{
-    minimum = 5, maximum = 100, value = 73,
-    bar_shape    = gears.shape.rounded_rect, bar_height = 4,
-    bar_color    = "#4a4a4f",
-    handle_shape = gears.shape.circle, handle_width = 12,
-    handle_color = "#f2f2f7",
-}
--- 4.3's slider:fit returns the *available* height ("use with a constraint
--- widget"), which would blow the popover up to its 9999px cap.
-bright.forced_height = 20
-bright:connect_signal("button::press",   function() bright_dragging = true end)
-bright:connect_signal("button::release", function()
-    bright_dragging = false
-    pending_bright = bright.value
-    if not bright_timer.started then bright_timer:start() else bright_timer:again() end
-end)
-bright:connect_signal("property::value", function()
-    if bright_syncing then return end
-    set_markup(bright_pct, markup(tostring(math.floor(bright.value)) .. "%",
-        FG_MUTED, "Inter Medium 9"))
-    pending_bright = bright.value
-    if not bright_timer.started then bright_timer:start() else bright_timer:again() end
-end)
 
-function resync_soon()
-    gears.timer.start_new(1.0, function() refresh(); return false end)
+local function queue(field, value)
+    if field == "bright" then pending_bright = value else pending_vol = value end
+    if not throttle.started then throttle:start() else throttle:again() end
 end
 
+local refresh -- forward declaration (toggles and the timer call it)
+
+local function resync_soon(delay)
+    gears.timer.start_new(delay or 1.0, function()
+        if refresh_timer and refresh_timer.started then refresh() end
+        return false
+    end)
+end
+
+-------------------------------------------------------------------------- refresh
+
 function refresh()
-    -- Wi-Fi: radio state, then the active wireless connection's name.
-    awful.spawn.easy_async_with_shell(
-        "nmcli -t -f WIFI radio 2>/dev/null || true", function(out)
-            local on = out:match("enabled") ~= nil
-            wifi_switch:set_checked(on)
-            if on then
-                awful.spawn.easy_async_with_shell(
-                    "nmcli --escape=no -t -f NAME,TYPE connection show --active 2>/dev/null | " ..
-                    "grep 802-11-wireless | cut -d: -f1 | head -1 || true",
-                    function(ssid)
-                        ssid = (ssid or ""):gsub("[\r\n]+$", "")
-                        set_markup(wifi_label, markup(
-                            ssid ~= "" and ssid or "Wi-Fi",
-                            ssid ~= "" and FG_MAIN or FG_MUTED))
-                    end)
-            else
-                set_markup(wifi_label, markup("Wi-Fi off", FG_MUTED))
+    awful.spawn.easy_async_with_shell(PROBE, function(out)
+        local d = {}
+        for line in (out or ""):gmatch("[^\n]+") do
+            local kind, a, b = line:match("^(%u)[ \t](.*)$")
+            if kind == "P" or kind == "C" then
+                local mac, name = a:match("^([%x:]+)\t(.+)$")
+                if mac then
+                    local dev = d.devices and d.devices[mac]
+                    if not dev then
+                        dev = { mac = mac, name = name, connected = false }
+                        d.devices = d.devices or {}
+                        d.devices[mac] = dev
+                    end
+                    if kind == "C" then dev.connected = true; dev.cname = name end
+                end
+            elseif kind then
+                d[kind] = a
             end
-        end)
+        end
 
-    -- Bluetooth: controller power state.
-    awful.spawn.easy_async_with_shell(
-        "bluetoothctl show 2>/dev/null | grep -m1 'Powered:' | grep -oE 'yes|no' || true",
-        function(out)
-            local on = out:match("yes") ~= nil
-            bt_switch:set_checked(on)
-            set_markup(bt_label, markup(on and "Bluetooth" or "Bluetooth off",
-                on and FG_MAIN or FG_MUTED))
-        end)
+        -- Wi-Fi
+        state.wifi_available = not (d.W == "unavailable" or d.W == nil)
+        state.wifi_on = state.wifi_available and d.W:find("enabled") ~= nil
+        state.wifi_name = (d.S and d.S ~= "") and d.S or nil
+        if wifi_row then
+            wifi_row:set(
+                state.wifi_on and (state.wifi_name or "Wi-Fi") or "Wi-Fi",
+                state.wifi_available and (state.wifi_on and "connected" or "off") or "unavailable",
+                state.wifi_on)
+        end
 
-    -- Brightness: current backlight percentage.
-    awful.spawn.easy_async_with_shell("brightnessctl -m 2>/dev/null || true", function(out)
-        local pct = tonumber(out:match(",(%d+)%%,"))
+        -- Bluetooth + paired devices
+        state.bt_available = (d.B ~= nil and d.B ~= "")
+        state.bt_on = d.B == "yes"
+        if bt_row then
+            bt_row:set("Bluetooth",
+                state.bt_available and (state.bt_on and "on" or "off") or "unavailable",
+                state.bt_on)
+        end
+        if device_list then
+            device_list:reset()
+            local devices = {}
+            for _, dev in pairs(d.devices or {}) do devices[#devices + 1] = dev end
+            table.sort(devices, function(a, b)
+                if a.connected ~= b.connected then return a.connected end
+                return a.name < b.name
+            end)
+            local shown = 0
+            for _, dev in ipairs(devices) do
+                if shown >= 3 then break end
+                shown = shown + 1
+                local dot = ui.dot(dev.connected and ui.color.ok or "#ffffff26", 5)
+                local name = ui.text{ font = ui.font.small, ellipsize = "end", width = 158 }
+                ui.set_text(name, dev.name, dev.connected and ui.color.text or ui.color.text_dim)
+                local st = ui.text{ font = ui.font.tiny, align = "right", width = 66 }
+                ui.set_text(st, dev.connected and "connected" or "paired", ui.color.text_faint)
+                local r = wibox.container.background()
+                r.shape = gears.shape.rounded_rect
+                r.bg = "#00000000"
+                r.forced_height = 24
+                r.widget = ui.pad(wibox.widget{
+                    wibox.widget{
+                        { dot, left = 6, right = 8, widget = wibox.container.margin },
+                        name,
+                        layout = wibox.layout.fixed.horizontal,
+                    },
+                    nil,
+                    st,
+                    layout = wibox.layout.align.horizontal,
+                }, 2, 2, 0, 0)
+                ui.hover(r, function() return "#00000000" end, ui.color.hover)
+                r:buttons(gears.table.join(awful.button({}, 1, function()
+                    awful.spawn.with_shell("bluetoothctl " ..
+                        (dev.connected and "disconnect " or "connect ") .. dev.mac)
+                    resync_soon(1.5)
+                end)))
+                device_list:add(r)
+            end
+            if shown == 0 then
+                local empty = ui.text{ font = ui.font.tiny }
+                ui.set_text(empty, state.bt_available and state.bt_on
+                    and "No paired devices" or "Bluetooth is off",
+                    ui.color.text_faint, ui.font.tiny)
+                device_list:add(empty)
+            end
+        end
+
+        -- Dark mode (GNOME colour scheme)
+        state.dark = d.K == "'prefer-dark'"
+        if dark_row then dark_row:set("Dark mode", "system colour scheme", state.dark) end
+
+        -- Brightness
+        local pct = tonumber(d.L and d.L:match("(%d+)%%") or nil)
         if pct then
-            set_markup(bright_pct, markup(tostring(pct) .. "%", FG_MUTED, "Inter Medium 9"))
-            if not bright_dragging then
-                bright_syncing = true
-                bright:set_value(pct)
-                bright_syncing = nil
+            ui.set_text(bright_pct, pct .. "%", ui.color.text, ui.font.body)
+            if not dragging then
+                syncing = true
+                bright_slider:set_value(pct)
+                syncing = nil
+            end
+        end
+
+        -- Volume
+        local vol = d.V and d.V:match("Volume:%s*([%d%.]+)")
+        if vol then
+            state.volume = math.floor(tonumber(vol) * 100 + 0.5)
+            state.muted = d.V:find("MUTED", 1, true) ~= nil
+            ui.set_text(vol_pct, (state.muted and "muted" or state.volume .. "%"),
+                state.muted and ui.color.text_faint or ui.color.text, ui.font.body)
+            ui.set_icon(vol_icon, state.muted and FA_VOL_MUTE or FA_VOL, 11,
+                state.muted and ui.color.text_faint or ui.color.text_dim)
+            if not dragging then
+                syncing = true
+                vol_slider:set_value(state.volume)
+                syncing = nil
             end
         end
     end)
 end
 
--- Row = icon + label on the left, control pinned to the right.
-local function row(icon, label, trailing)
-    return wibox.widget{
-        {
-            icon,
-            { label, left = 10, widget = wibox.container.margin },
-            layout = wibox.layout.fixed.horizontal,
-        },
-        trailing,
-        layout = wibox.layout.align.horizontal,
-    }
+-------------------------------------------------------------------------- content
+
+local function build_content()
+    wifi_row = switch_row(FA_WIFI, "Wi-Fi", nil, "wifi", function(on)
+        awful.spawn.with_shell("nmcli radio wifi " .. (on and "on" or "off"))
+        resync_soon()
+    end)
+
+    bt_row = switch_row(FA_BT, "Bluetooth", nil, "bt", function(on)
+        awful.spawn.with_shell("bluetoothctl power " .. (on and "on" or "off"))
+        resync_soon()
+    end)
+
+    device_list = wibox.layout.fixed.vertical()
+    device_list.spacing = 0
+
+    dark_row = switch_row(FA_MOON, "Dark mode", "system colour scheme", "dark", function(on)
+        awful.spawn.with_shell("gsettings set org.gnome.desktop.interface color-scheme " ..
+            (on and "prefer-dark" or "default"))
+        resync_soon(0.6)
+    end)
+
+    bright_pct = ui.text{ font = ui.font.body, width = 40, align = "right" }
+    bright_slider = slider(5, 100)
+    bright_slider:connect_signal("button::press", function() dragging = true end)
+    bright_slider:connect_signal("button::release", function()
+        dragging = false
+        queue("bright", bright_slider:get_value())
+    end)
+    bright_slider:connect_signal("property::value", function()
+        if syncing then return end
+        ui.set_text(bright_pct, math.floor(bright_slider:get_value()) .. "%",
+            ui.color.text, ui.font.body)
+        queue("bright", bright_slider:get_value())
+    end)
+
+    vol_pct = ui.text{ font = ui.font.body, width = 40, align = "right" }
+    vol_slider = slider(0, 100)
+    vol_icon = ui.icon(FA_VOL, 11, ui.color.text_dim)
+    vol_icon:buttons(gears.table.join(awful.button({}, 1, function()
+        awful.spawn.with_shell("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle")
+        resync_soon(0.5)
+    end)))
+    vol_slider:connect_signal("button::press", function() dragging = true end)
+    vol_slider:connect_signal("button::release", function()
+        dragging = false
+        queue("vol", vol_slider:get_value())
+    end)
+    vol_slider:connect_signal("property::value", function()
+        if syncing then return end
+        ui.set_text(vol_pct, math.floor(vol_slider:get_value()) .. "%",
+            state.muted and ui.color.text_faint or ui.color.text, ui.font.body)
+        queue("vol", vol_slider:get_value())
+    end)
+
+    local bright_row = row(FA_SUN, "Brightness", wibox.widget{
+        bright_slider, { bright_pct, left = 8, widget = wibox.container.margin },
+        layout = wibox.layout.fixed.horizontal,
+    })
+    local vol_row = row(FA_VOL, "Volume", wibox.widget{
+        vol_slider, { vol_pct, left = 8, widget = wibox.container.margin },
+        layout = wibox.layout.fixed.horizontal,
+    })
+
+    local open_panel = row(FA_PANEL, "Open AETHER panel", nil, 26, true)
+    open_panel:buttons(gears.table.join(awful.button({}, 1, function()
+        M.close()
+        require("panel").toggle()
+    end)))
+    open_panel.label:set_markup_silently(
+        string.format('<span font="%s" foreground="%s">%s</span>',
+            ui.font.body, ui.color.accent_hi, "Open AETHER panel"))
+
+    local card = function(children)
+        local box = wibox.container.background()
+        box.shape = gears.shape.rounded_rect
+        box.bg = "#ffffff08"
+        box.shape_border_width = 1
+        box.shape_border_color = ui.color.border
+        box.widget = wibox.layout.fixed.vertical()
+        for _, child in ipairs(children) do box.widget:add(child) end
+        return box
+    end
+
+    local content = wibox.layout.fixed.vertical()
+    content.spacing = 10
+    content:add(ui.section("Connectivity"))
+    content:add(card{ wifi_row, ui.divider(), bt_row, device_list })
+    content:add(ui.section("Display & sound", { spacing_before = 2 }))
+    content:add(card{ dark_row, ui.divider(), bright_row, vol_row })
+    content:add(ui.divider())
+    content:add(open_panel)
+
+    local surface = ui.surface(content, 316)
+    return surface
 end
 
-local content = wibox.widget{
-    {
-        layout = wibox.layout.fixed.vertical,
-        spacing = 14,
-        row(icon_widget(FA_WIFI), wifi_label, wifi_switch),
-        row(icon_widget(FA_BT),   bt_label,   bt_switch),
-        {
-            {
-                icon_widget(FA_SUN),
-                { bright_pct, left = 10, widget = wibox.container.margin },
-                layout = wibox.layout.fixed.horizontal,
-            },
-            { bright, left = 14, right = 4, widget = wibox.container.margin },
-            layout = wibox.layout.align.horizontal,
-        },
-    },
-    margins = 16,
-    widget  = wibox.container.margin,
-}
-
--- Fixed width so long SSIDs ellipsize instead of resizing the popover.
-content.forced_width = 300
-wifi_label.ellipsize = "end"
-bt_label.ellipsize   = "end"
-
-local cc_popup = awful.popup{
-    widget = content,
-    ontop  = true,
-    type   = "dock",
-    visible = false,
-    bg     = POPUP_BG,
-    shape  = gears.shape.rounded_rect,
-    border_width = 0,
-    preferred_positions = "bottom",
-    preferred_anchors   = "back", -- hug the right edge, under the button
-}
-cc_popup:connect_signal("mouse::leave", function() M.close() end)
+-------------------------------------------------------------------------- popup
 
 local cc_open = false
+local cc_popup -- the current content widget (built per open)
 
 local function close_cc()
     if not cc_open then return end
     cc_open = false
-    anim.tween{ tag = "cc_popup", duration = 0.12, step = function(t)
-        cc_popup.opacity = 1 - t
-    end, done = function()
-        if cc_popup and not cc_open then
-            cc_popup.visible = false
-            cc_popup.opacity = 1
-        end
-    end }
+    if refresh_timer then refresh_timer:stop() end
+    popover_mgr.close("cc")
 end
 
 local function open_cc()
-    -- One popover at a time: the media popover yields (lazy require keeps
-    -- control_center <-> frostbar from being a require cycle).
-    pcall(function() require("frostbar").close_media() end)
+    -- One surface at a time across the whole bar; the media popover, the
+    -- AETHER panel and any contextual reveal yield to it.  Placement,
+    -- animation and dismissal are owned by the shared surface manager.
+    cc_popup = build_content()
+    popover_mgr.show{
+        id = "cc",
+        content = cc_popup,
+        width = 316,
+        modal = true,
+        on_open = function()
+            cc_open = true
+            if not refresh_timer then
+                refresh_timer = gears.timer{ timeout = 2.5, callback = function() refresh() end }
+            end
+            if not refresh_timer.started then refresh_timer:start() end
+        end,
+        on_close = function()
+            cc_open = false
+            if refresh_timer then refresh_timer:stop() end
+        end,
+    }
     refresh()
-    -- Anchor to the bar on the screen under the pointer (the one the user
-    -- clicked), not the focused client's screen.
-    local s = mouse.screen or awful.screen.focused()
-    if not s then return end
-    cc_popup:move_next_to(s.mywibox)
-    cc_open = true
-    anim.tween{ tag = "cc_popup", duration = 0.18, step = function(t)
-        cc_popup.opacity = t
-    end }
 end
 
 function M.toggle()
@@ -299,20 +496,22 @@ function M.close()
 end
 
 --------------------------------------------------------------------------
--- Bar button (sliders glyph, macOS control-center style)
+-- Bar button: a clear, hoverable pill in the right cluster.
 --------------------------------------------------------------------------
 
-local cc_button = wibox.widget.textbox()
-cc_button.font = "FontAwesome 10"
-set_markup(cc_button, string.format('<span foreground="%s">%s</span>', FG_MUTED, FA_SLIDERS))
-cc_button:buttons(gears.table.join(awful.button({}, 1, function() M.toggle() end)))
-cc_button:connect_signal("mouse::enter", function()
-    set_markup(cc_button, string.format('<span foreground="%s">%s</span>', FG_MAIN, FA_SLIDERS))
-end)
-cc_button:connect_signal("mouse::leave", function()
-    set_markup(cc_button, string.format('<span foreground="%s">%s</span>', FG_MUTED, FA_SLIDERS))
-end)
-
-M.button = cc_button
+function M.new_button()
+    local glyph = ui.icon(FA_SLIDERS, 10, ui.color.text_dim)
+    local root = wibox.container.background()
+    root.shape = gears.shape.rounded_rect
+    root.bg = "#00000000"
+    root.forced_width = 30
+    root.forced_height = 24
+    root.widget = wibox.container.place(ui.pad(glyph, 10, 10, 0, 0))
+    ui.hover(root, function() return "#00000000" end, ui.color.hover,
+        function() ui.set_icon(glyph, FA_SLIDERS, 10, ui.color.text) end,
+        function() ui.set_icon(glyph, FA_SLIDERS, 10, ui.color.text_dim) end)
+    root:buttons(gears.table.join(awful.button({}, 1, function() M.toggle() end)))
+    return root
+end
 
 return M

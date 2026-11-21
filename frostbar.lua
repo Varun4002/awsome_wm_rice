@@ -20,11 +20,13 @@
 -- the dirty-area rule (wibox/drawable.lua repaints only what a widget
 -- marks dirty). When idle nothing repaints: zero idle cost.
 --
--- Also builds the bar's data widgets (shared across screens, macOS
--- styling, Inter Medium 10): M.song (playerctl), M.volume (wpctl) and
--- M.usage (opencode stats). All polling is async; the main loop never
+-- Also builds the bar's data widgets (macOS styling, Inter Medium 10):
+-- per-screen now-playing and volume widgets (M.new_song / M.new_volume)
+-- driven by shared polled state.  All polling is async; the main loop never
 -- blocks.
 --------------------------------------------------------------------------
+
+AETHER_FROSTBAR = "v2-cursor"
 
 local wibox = require("wibox")
 local awful = require("awful")
@@ -36,7 +38,9 @@ local cairo = lgi.cairo
 local lfs   = require("lfs")
 
 local cycler = require("wallpaper_cycler")
-local anim   = require("anim") -- popover fades (see the media popover below)
+local anim   = require("anim") -- switch/slider tweens
+local ui     = require("ui")
+local popover_mgr = require("popover")
 
 local M = {}
 
@@ -365,27 +369,108 @@ end
 -- text and the media popover (defined below). length/position are
 -- microseconds ({{mpris:length}} / {{position}}).
 local media = { player = nil, status = nil, title = nil, artist = nil,
-                length = nil, position = nil }
+                length = nil, position = nil, has = false }
 
 -- Media popover hooks (defined below). Forward declarations because the
 -- poll needs them: it opens nothing itself but must close the popover if
 -- the player goes away while it is open, and refresh it on every poll.
 local media_open = false
-local media_popup -- forward declaration (close_media guards on it)
 local toggle_media, close_media, refresh_media_ui, focus_player, open_media
 
-local song_text = wibox.widget.textbox()
-song_text.font = FONT_MAIN
-song_text.ellipsize = "end"
-song_text.wrap = "char"
-song_text.visible = false
+-- One widget set per screen: a widget cannot belong to two bar hierarchies,
+-- so the song text and the volume glyph are created per bar and every
+-- instance is driven from the same polled state.
+local song_widgets = {}
+local cap -- forward declaration (render_song uses it)
 
-M.song = spaced(song_text, 8, 8)
+-- Transport glyphs shared by the bar's mini-player and the media card.
+local FA_PREV, FA_PLAY, FA_PAUSE, FA_NEXT = "\u{f048}", "\u{f04b}", "\u{f04c}", "\u{f051}"
+
+-- Seek plumbing lives in the media section below; the bar's mini-player
+-- needs it at construction/poll time (both run after the module loads).
+local attach_seek, sync_seek
+
+local function render_song()
+    local markup, visible
+    if media.has then
+        local glyph = (media.status == "Playing") and "▶" or "❚❚"
+        local text = cap((media.artist ~= nil and media.artist .. " — " or "")
+                         .. (media.title or ""))
+        markup = string.format(
+            '<span foreground="%s">%s</span> <span foreground="%s">%s</span> ' ..
+            '<span foreground="%s">%s</span>',
+            FG_MUTED, esc(pretty_app(media.player) or "Now Playing"),
+            FG_MUTED, glyph, FG_MAIN, esc(text))
+        visible = true
+    end
+    for _, w in ipairs(song_widgets) do
+        if markup and w.text._private.frost_markup ~= markup then
+            w.text._private.frost_markup = markup
+            w.text:set_markup_silently(markup)
+        end
+        if w.play then
+            local pglyph = (media.status == "Playing") and FA_PAUSE or FA_PLAY
+            local pmark = string.format(
+                '<span foreground="%s">%s</span>', FG_MAIN, pglyph)
+            if w.play._private.frost_markup ~= pmark then
+                w.play._private.frost_markup = pmark
+                w.play:set_markup_silently(pmark)
+            end
+        end
+        if w.text.visible ~= visible then
+            w.text.visible = visible
+            w.box.visible = visible -- collapse the margins entirely when hidden
+        end
+    end
+end
+
+--- New now-playing mini-player for one screen's bar: track, play/pause,
+-- elapsed/total time and a seekbar, all inline (the media card keeps the
+-- full controls).
+function M.new_song()
+    local text = wibox.widget.textbox()
+    text.font = FONT_MAIN
+    text.ellipsize = "end"
+    text.wrap = "char"
+    text.visible = false
+    -- click = open the media popover (full controls); scrolling still
+    -- skips tracks without opening anything.
+    text:buttons(gears.table.join(
+        awful.button({}, 1, function() toggle_media() end),
+        awful.button({}, 4, function() awful.spawn.with_shell("playerctl next") end),
+        awful.button({}, 5, function() awful.spawn.with_shell("playerctl previous") end)
+    ))
+    local play = wibox.widget.textbox()
+    play.font = "FontAwesome 10"
+    play.forced_width = 16
+    play:buttons(gears.table.join(awful.button({}, 1, function()
+        awful.spawn.with_shell("playerctl play-pause") end)))
+    local time = wibox.widget.textbox()
+    time.font = "Inter Medium 9"
+    time.visible = false
+    local bar = ui.slider{
+        minimum = 0, maximum = 1000, value = 0,
+        width = 90, height = 18, bar_height = 4,
+        handle_color = "#f2f2f7",
+    }
+    attach_seek(bar)
+    local row = wibox.widget{
+        text, play, time, bar,
+        spacing = 6, layout = wibox.layout.fixed.horizontal,
+    }
+    local box = spaced(row, 8, 8)
+    box.visible = false
+    song_widgets[#song_widgets + 1] =
+        { text = text, play = play, time = time, bar = bar, box = box }
+    render_song()
+    return box
+end
 
 -- Cap the composed text: a pango layout with a positive height inside a
--- 30px bar could wrap to 2 lines; a character cap keeps it to one line.
-local SONG_MAX = 44
-local function cap(s)
+-- 38px bar could wrap to 2 lines; a character cap keeps it to one line.
+-- (Shorter cap now that the mini-player carries the extra controls.)
+local SONG_MAX = 26
+cap = function(s)
     local n = utf8.len(s)
     if not n or n <= SONG_MAX then return s end
     local ok, off = pcall(utf8.offset, s, SONG_MAX)
@@ -393,19 +478,6 @@ local function cap(s)
         return s:sub(1, off - 1) .. "…"
     end
     return s:sub(1, SONG_MAX) .. "…"
-end
-
-local function set_song(markup)
-    if song_text._private.frost_markup == markup then return end
-    song_text._private.frost_markup = markup
-    song_text:set_markup_silently(markup)
-end
-
-local function set_song_visible(b)
-    if song_text.visible ~= b then
-        song_text.visible = b
-        M.song.visible = b -- collapse the margins entirely when hidden
-    end
 end
 
 local function poll_song()
@@ -425,57 +497,85 @@ local function poll_song()
             media.artist   = artist ~= "" and artist or nil
             media.length   = tonumber(length) or nil
             media.position = tonumber(position) or nil
+            media.has      = has == true
+            render_song()
+            if sync_seek then sync_seek() end
             if not has then
-                set_song_visible(false) -- no player / empty metadata
                 if media_open then close_media() end
                 return
             end
-            local glyph = (media.status == "Playing") and "▶" or "❚❚"
-            local text = cap((media.artist ~= "" and media.artist .. " — " or "")
-                             .. media.title)
-            set_song(string.format(
-                '<span foreground="%s">%s</span> <span foreground="%s">%s</span> ' ..
-                '<span foreground="%s">%s</span>',
-                FG_MUTED, esc(pretty_app(media.player) or "Now Playing"),
-                FG_MUTED, glyph, FG_MAIN, esc(text)))
-            set_song_visible(true)
             if media_open then refresh_media_ui() end
         end)
 end
-
--- click = open the media popover (seekbar + controls); scrolling on the
--- text still skips tracks without opening anything.
-song_text:buttons(gears.table.join(
-    awful.button({}, 1, function() toggle_media() end),
-    awful.button({}, 4, function() awful.spawn.with_shell("playerctl next") end),
-    awful.button({}, 5, function() awful.spawn.with_shell("playerctl previous") end)
-))
 
 gears.timer{ timeout = 3, autostart = true, call_now = true, callback = poll_song }
 
 -------------------------------------------------------------------------- volume widget
 
 local FA_NORMAL = "\u{f028}" -- FontAwesome volume-up
+local FA_DOWN   = "\u{f027}" -- FontAwesome volume-down
 local FA_MUTED  = "\u{f026}" -- FontAwesome volume-off
 
-local volume_text = wibox.widget.textbox()
-volume_text.font = FONT_MAIN
-volume_text.visible = false
-
-M.volume = spaced(volume_text, 4, 10)
-
 local vol_state = { pct = nil, muted = false }
+local volume_widgets = {}
+local volume_change -- forward declaration (the per-screen widget uses it)
+local vol_bar_dragging = false -- a bar drag owns the volume; the poll stands down
+local volume_drag_start -- forward declaration (the per-screen widget uses it)
+
+-- Level glyphs for the drag readout: the icon itself tracks the volume.
+local function vol_glyph(pct)
+    if pct == nil or pct <= 0 then return FA_MUTED end
+    if pct < 50 then return FA_DOWN end
+    return FA_NORMAL
+end
+
+local function render_volume()
+    local pct, muted = vol_state.pct, vol_state.muted
+    local glyph = muted and FA_MUTED or FA_NORMAL
+    local fg = (muted or pct == nil) and FG_MUTED
+        or (vol_bar_dragging and ui.color.accent_hi or FG_MAIN)
+    local markup = pct and string.format(
+        '<span font="FontAwesome 10" foreground="%s">%s</span>' ..
+        '<span font="Inter Medium 10" foreground="%s">  %d%%</span>',
+        fg, glyph, fg, pct) or nil
+    for _, w in ipairs(volume_widgets) do
+        if markup then
+            if w.text._private.frost_markup ~= markup then
+                w.text._private.frost_markup = markup
+                w.text:set_markup_silently(markup)
+            end
+        end
+        if w.text.visible ~= (markup ~= nil) then
+            w.text.visible = markup ~= nil
+            w.box.visible = markup ~= nil
+        end
+    end
+end
+
+--- New volume indicator for one screen's bar.
+function M.new_volume()
+    local text = wibox.widget.textbox()
+    text.font = FONT_MAIN
+    text.visible = false
+    -- press-hold-drag = scrub the volume (left decreases, right increases,
+    -- release sticks; a press that never moves keeps the old click
+    -- behaviour below); scroll up = +5%, scroll down = -5%.
+    text:buttons(gears.table.join(
+        awful.button({}, 1, function() volume_drag_start() end),
+        awful.button({}, 4, function() volume_change("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+") end),
+        awful.button({}, 5, function() volume_change("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-") end)
+    ))
+    local box = spaced(text, 4, 10)
+    box.visible = false
+    volume_widgets[#volume_widgets + 1] = { text = text, box = box }
+    render_volume()
+    return box
+end
 
 local function set_volume(pct, muted)
     if vol_state.pct == pct and vol_state.muted == muted then return end
     vol_state.pct, vol_state.muted = pct, muted
-    local glyph = muted and FA_MUTED or FA_NORMAL
-    local fg = muted and FG_MUTED or FG_MAIN
-    volume_text:set_markup_silently(string.format(
-        '<span font="FontAwesome 10" foreground="%s">%s</span>' ..
-        '<span font="Inter Medium 10" foreground="%s">  %d%%</span>',
-        fg, glyph, fg, pct))
-    volume_text.visible = true
+    render_volume()
 end
 
 -- wpctl: "Volume: 0.65" possibly + " [MUTED]"
@@ -483,9 +583,11 @@ local function poll_volume()
     awful.spawn.easy_async_with_shell(
         "wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null || true",
         function(out)
+            if vol_bar_dragging then return end -- don't fight an active drag
             local v = out:match("Volume:%s*([%d%.]+)")
             if not v then
-                volume_text.visible = false
+                vol_state.pct = nil
+                render_volume()
                 return
             end
             set_volume(math.floor(tonumber(v) * 100 + 0.5),
@@ -493,7 +595,7 @@ local function poll_volume()
         end)
 end
 
-local function volume_change(cmd)
+volume_change = function(cmd)
     awful.spawn.with_shell(cmd) -- async, never blocks the main loop
     -- re-read shortly after so the widget reflects the action immediately
     gears.timer.start_new(0.25, function()
@@ -502,58 +604,175 @@ local function volume_change(cmd)
     end)
 end
 
--- click = raise the window that owns the player (the browser tab playing
--- audio, a media app, etc.); scroll up = +5%, scroll down = -5%.
-volume_text:buttons(gears.table.join(
-    awful.button({}, 1, function() focus_player() end),
-    awful.button({}, 4, function() volume_change("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+") end),
-    awful.button({}, 5, function() volume_change("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-") end)
-))
-
+-- The 2s poll keeps the widget honest (device changes, other apps
+-- adjusting volume); the drag guard inside poll_volume prevents fighting.
 gears.timer{ timeout = 2, autostart = true, call_now = true, callback = poll_volume }
 
--------------------------------------------------------------------------- opencode usage widget
+-------------------------------------------------------------------------- volume drag
 
--- Meaningful figure = tokens.input + output + reasoning (cache.read is
--- an order of magnitude larger and not real usage). Cost is always 0 on
--- this provider. Measured runtime: ~0.14s, so 60s polling is cheap.
-local usage_text = wibox.widget.textbox()
-usage_text.font = FONT_MAIN
-usage_text.visible = false
+-- Press and hold button 1 on the bar's volume indicator and drag: the
+-- pointer delta from the press maps 1:1 to volume (1 px = 1 %) — dragging
+-- left decreases, right increases — and every step is applied live so the
+-- change is audible while scrubbing. On release the final value is written
+-- once more and sticks (the next poll confirms it). A press that never
+-- moves keeps the click's old meaning: raise the player's window.
 
-M.usage = spaced(usage_text, 4, 10)
+local DRAG_PCT_PER_PX = 1
+local DRAG_THRESHOLD  = 3   -- px of pointer movement before it counts as a drag
+local APPLY_EVERY_MS  = 120 -- throttle between live wpctl writes
 
-local usage_markup = nil
+local volume_drag_finish
+local drag = nil -- { start_x, start_pct, moved, sent_ms }
+local drag_active = false -- the mousegrabber is live for the current press
 
-local function poll_usage()
-    -- awesome's PATH lacks ~/.opencode/bin where the opencode binary lives
-    awful.spawn.easy_async_with_shell(
-        'PATH="$HOME/.opencode/bin:$PATH" opencode stats --days 0 --json 2>/dev/null | ' ..
-        "jq -r '[(.tokens.input + .tokens.output + .tokens.reasoning), .sessions] | @tsv' " ..
-        "2>/dev/null || true",
-        function(out)
-            local nums = {}
-            for n in out:gmatch("%d+") do
-                nums[#nums + 1] = tonumber(n)
-                if #nums == 2 then break end
-            end
-            if #nums == 2 and nums[1] > 0 then
-                local markup = string.format(
-                    '<span foreground="%s">opencode</span> <span foreground="%s">%s</span>' ..
-                    '<span foreground="%s"> · %ds</span>',
-                    FG_MUTED, FG_MAIN, human(nums[1]), FG_MUTED, nums[2])
-                if markup ~= usage_markup then
-                    usage_markup = markup
-                    usage_text:set_markup_silently(markup)
-                    usage_text.visible = true
-                end
-            else
-                usage_text.visible = false -- error / no jq / empty stats
-            end
-        end)
+-- Floating readout under the bar while dragging: level glyph, fill bar and
+-- percentage, so direction and magnitude are visible beyond the bar text.
+local osd, osd_glyph, osd_bar, osd_pct
+local OSD_W, OSD_H = 208, 44
+
+local function make_osd()
+    osd_glyph = wibox.widget.textbox()
+    osd_glyph.font = "FontAwesome 13"
+    osd_glyph.forced_width = 16
+    osd_pct = wibox.widget.textbox()
+    osd_pct.font = "Inter SemiBold 11"
+    osd_pct.forced_width = 44
+    osd_bar = wibox.widget.progressbar{
+        max_value        = 100,
+        value            = 0,
+        color            = ui.color.accent,
+        background_color = ui.color.track,
+        shape            = gears.shape.rounded_rect,
+        bar_shape        = gears.shape.rounded_rect,
+    }
+    osd_bar.forced_width  = 104
+    osd_bar.forced_height = 6
+    osd = wibox{
+        ontop = true, visible = false, type = "menu", -- picom: blur + shadow
+        bg = ui.color.bg_popup,
+        shape = gears.shape.rounded_rect,
+        border_width = 1, border_color = ui.color.border,
+        opacity = 1,
+    }
+    osd.widget = wibox.widget{
+        { -- the bar sits in a place wrapper: fixed.horizontal hands each
+          -- child the row's full height, which would stretch it otherwise
+            osd_glyph,
+            { osd_bar, layout = wibox.container.place, valign = "center" },
+            osd_pct,
+            spacing = 10, layout = wibox.layout.fixed.horizontal,
+        },
+        margins = 12, widget = wibox.container.margin,
+    }
 end
 
-gears.timer{ timeout = 60, autostart = true, call_now = true, callback = poll_usage }
+local function osd_paint(pct)
+    osd_bar.value = pct
+    local gmark = string.format(
+        '<span font="FontAwesome 13" foreground="%s">%s</span>',
+        FG_MAIN, vol_glyph(pct))
+    if osd_glyph._private.frost_markup ~= gmark then
+        osd_glyph._private.frost_markup = gmark
+        osd_glyph:set_markup_silently(gmark)
+    end
+    local pmark = string.format(
+        '<span font="Inter SemiBold 11" foreground="%s">%d%%</span>',
+        FG_MAIN, pct)
+    if osd_pct._private.frost_markup ~= pmark then
+        osd_pct._private.frost_markup = pmark
+        osd_pct:set_markup_silently(pmark)
+    end
+end
+
+-- Anchored under the pressed widget (screen coordinates, same convention
+-- as popover.lua's place), clamped into the screen with an 8 px margin.
+local function osd_show(anchor, s)
+    if not osd then make_osd() end
+    osd_paint(vol_state.pct or 0)
+    local g = s.geometry
+    local x = g.x + math.floor((g.width - OSD_W) / 2)
+    if anchor and anchor.width and anchor.width > 0 then
+        x = anchor.x + math.floor((anchor.width - OSD_W) / 2)
+    end
+    x = math.max(g.x + 8, math.min(x, g.x + g.width - OSD_W - 8))
+    osd:geometry{ x = x, y = g.y + ((s.mywibox and s.mywibox.height) or ui.bar_height) + 6,
+                  width = OSD_W, height = OSD_H }
+    osd.visible = true
+    anim.tween{ tag = "frostbar_vol_osd", duration = 0.12, step = function(t)
+        osd.opacity = t
+    end }
+end
+
+local function osd_hide()
+    if not (osd and osd.visible) then return end
+    anim.tween{ tag = "frostbar_vol_osd", duration = 0.15, step = function(t)
+        osd.opacity = 1 - t
+    end, done = function()
+        if not drag and osd then osd.visible = false end
+    end }
+end
+
+function volume_drag_finish()
+    drag_active = false
+    local d = drag
+    drag = nil
+    vol_bar_dragging = false
+    popover_mgr.suppressed = false -- hover reveals may open again
+    if not d then return end
+    render_volume() -- drop the dragging accent colour
+    if d.moved then
+        -- One final absolute write pins the exact value shown when the
+        -- button came up, even if the last throttled write was skipped.
+        volume_change(string.format("wpctl set-volume @DEFAULT_AUDIO_SINK@ %d%%",
+                                    vol_state.pct or d.start_pct))
+        gears.timer.start_new(0.35, osd_hide) -- let the final value be read
+    else
+        focus_player() -- a press without movement is still a click
+    end
+end
+
+function volume_drag_start()
+    if drag_active then return end
+    if vol_state.pct == nil then focus_player() return end
+    local anchor = mouse.current_widget_geometry
+    local s = mouse.screen or awful.screen.focused()
+    drag = { start_x = mouse.coords().x, start_pct = vol_state.pct, moved = false }
+    vol_bar_dragging = true
+    drag_active = true
+    popover_mgr.suppressed = true -- no hover card may pop open mid-drag
+    -- mousegrabber.run returns nothing in this build (not a boolean), so
+    -- success cannot be tested from its return value; the callback's own
+    -- release/stale checks own the lifecycle instead.
+    mousegrabber.run(function(m)
+        if not drag_active or not drag then return false end
+        if not m.buttons[1] then -- release
+            volume_drag_finish()
+            return false
+        end
+        local dx = m.x - drag.start_x
+        if not drag.moved then
+            if math.abs(dx) < DRAG_THRESHOLD then return true end
+            drag.moved = true
+            if vol_state.muted then -- scrubbing implies unmuting
+                awful.spawn.with_shell("wpctl set-mute @DEFAULT_AUDIO_SINK@ 0")
+            end
+            osd_show(anchor, s)
+        end
+        local pct = math.max(0, math.min(100,
+            math.floor(drag.start_pct + dx * DRAG_PCT_PER_PX + 0.5)))
+        if pct ~= vol_state.pct then
+            set_volume(pct, false) -- instant bar update (accent-coloured)
+            local now = GLib.get_monotonic_time() / 1000
+            if now - (drag.sent_ms or 0) >= APPLY_EVERY_MS then
+                drag.sent_ms = now
+                awful.spawn.with_shell(
+                    string.format("wpctl set-volume @DEFAULT_AUDIO_SINK@ %d%%", pct))
+            end
+            osd_paint(pct)
+        end
+        return true
+    end, "sb_h_double_arrow")
+end
 
 -------------------------------------------------------------------------- media popover
 
@@ -561,8 +780,6 @@ gears.timer{ timeout = 60, autostart = true, call_now = true, callback = poll_us
 -- bar: app name, track info, a draggable seekbar (drag = seek, release =
 -- jump) and transport + volume controls. It follows the bar it was opened
 -- from; moving the pointer out of it fades it away.
-
-local FA_PREV, FA_PLAY, FA_PAUSE, FA_NEXT = "\u{f048}", "\u{f04b}", "\u{f04c}", "\u{f051}"
 
 -- Drag guards: while the pointer is on a slider handle the poll must not
 -- fight the drag, and while the poll syncs a slider it must not seek.
@@ -602,16 +819,11 @@ mp_artist.font = "Inter Medium 10"
 mp_artist.ellipsize = "end"
 mp_artist.forced_width = 276
 
-local seek = wibox.widget.slider{
+local seek = ui.slider{
     minimum = 0, maximum = 1000, value = 0,
-    bar_shape    = gears.shape.rounded_rect, bar_height = 4,
-    bar_color    = "#4a4a4f",
-    handle_shape = gears.shape.circle, handle_width = 12,
+    width = 210, height = 20, bar_height = 4,
     handle_color = "#f2f2f7",
 }
--- 4.3's slider:fit returns the *available* height ("use with a constraint
--- widget"), which would blow the popover up to its 9999px cap.
-seek.forced_height = 20
 local time_cur = wibox.widget.textbox()
 time_cur.font = "Inter Medium 9"
 local time_tot = wibox.widget.textbox()
@@ -630,17 +842,13 @@ btn_next:buttons(gears.table.join(awful.button({}, 1, function()
 -- Volume inside the popover: speaker glyph = mute toggle, slider = the
 -- system sink volume (same wpctl path as the bar's volume widget).
 local FA_VOLUP, FA_VOLMUTE = FA_NORMAL, FA_MUTED
-local vol = wibox.widget.slider{
+local vol = ui.slider{
     minimum = 0, maximum = 100, value = 0,
-    bar_shape    = gears.shape.rounded_rect, bar_height = 4,
-    bar_color    = "#4a4a4f",
-    handle_shape = gears.shape.circle, handle_width = 10,
+    width = 210, height = 20, bar_height = 4,
     handle_color = "#f2f2f7",
 }
-vol.forced_width = 210
-vol.forced_height = 20 -- see seek: slider:fit echoes the available height
 local vol_pct = wibox.widget.textbox()
-vol_pct.font = "Inter Medium 9"
+vol_pct.font = "Inter SemiBold 10"
 local btn_mute = glyph_button(FA_VOLUP, 12, FG_MUTED)
 btn_mute:buttons(gears.table.join(awful.button({}, 1, function()
     volume_change("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle") end)))
@@ -670,22 +878,26 @@ local seek_timer = gears.timer{ timeout = 0.25, single_shot = true,
 local vol_timer = gears.timer{ timeout = 0.25, single_shot = true,
                                callback = function() apply_pending_vol() end }
 
-seek:connect_signal("property::value", function()
-    if media_syncing or not media.length then return end
-    pending_seek = media.length * seek.value / 1000
-    schedule(seek_timer)
-end)
-seek:connect_signal("button::press",   function() seek_dragging = true end)
-seek:connect_signal("button::release", function()
-    seek_dragging = false
-    apply_pending_seek()
-end)
+--- Wire one seek slider (the media card's and the bar mini-player's) to
+-- the shared throttled seek machinery.
+function attach_seek(slider)
+    slider:connect_signal("property::value", function()
+        if media_syncing or not media.length then return end
+        pending_seek = media.length * slider:get_value() / 1000
+        schedule(seek_timer)
+    end)
+    slider:connect_signal("button::press", function() seek_dragging = true end)
+    slider:connect_signal("button::release", function()
+        seek_dragging = false
+        apply_pending_seek()
+    end)
+end
 
 vol:connect_signal("property::value", function()
     if vol_syncing then return end
-    set_markup_now(vol_pct, string.format('<span font="Inter Medium 9" foreground="%s">%d%%</span>',
-        FG_MUTED, math.floor(vol.value + 0.5)))
-    pending_vol = vol.value
+    set_markup_now(vol_pct, string.format('<span font="Inter SemiBold 10" foreground="%s">%d%%</span>',
+        FG_MAIN, math.floor(vol:get_value() + 0.5)))
+    pending_vol = vol:get_value()
     schedule(vol_timer)
 end)
 vol:connect_signal("button::press",   function() vol_dragging = true end)
@@ -707,8 +919,43 @@ local function fmt_us(us)
     return string.format("%d:%02d", math.floor(s / 60), s % 60)
 end
 
+--- Sync the card's and the bar's seek sliders + time labels from the
+-- polled position, holding off while the user drags or a seek lands.
+function sync_seek()
+    local len = media.length or 0
+    local stamp = GLib.get_monotonic_time() / 1000
+    local tmark
+    if len > 0 then
+        tmark = string.format(
+            '<span font="Inter Medium 9" foreground="%s">%s/%s</span>',
+            FG_MUTED, fmt_us(media.position), fmt_us(len))
+    else
+        tmark = ""
+    end
+    for _, w in ipairs(song_widgets) do
+        set_markup_now(w.time, tmark)
+        if w.bar then w.bar.sensitive = len > 0 end
+    end
+    set_markup_now(time_cur, string.format(
+        '<span font="Inter Medium 9" foreground="%s">%s</span>',
+        FG_MUTED, fmt_us(media.position)))
+    set_markup_now(time_tot, string.format(
+        '<span font="Inter Medium 9" foreground="%s">%s</span>',
+        FG_MUTED, fmt_us(len)))
+    if len <= 0 then return end
+    if not seek_dragging and stamp >= seek_hold_until then
+        local v = math.floor((media.position or 0) / len * 1000 + 0.5)
+        media_syncing = true
+        seek:set_value(v)
+        for _, w in ipairs(song_widgets) do
+            if w.bar then w.bar:set_value(v) end
+        end
+        media_syncing = nil
+    end
+end
+
 function refresh_media_ui()
-    if not media_popup then return end
+    if not media_open then return end -- nothing to repaint while closed
     local state = (media.status == "Playing") and "playing" or "paused"
     set_markup_now(mp_app, string.format(
         '<span font="Inter Medium 9" foreground="%s">%s</span>', FG_MUTED,
@@ -726,23 +973,11 @@ function refresh_media_ui()
         '<span font="FontAwesome 12" foreground="%s">%s</span>', FG_MUTED,
         vol_state.muted and FA_VOLMUTE or FA_VOLUP))
     set_markup_now(vol_pct, string.format(
-        '<span font="Inter Medium 9" foreground="%s">%d%%</span>',
-        FG_MUTED, vol_state.pct or 0))
+        '<span font="Inter SemiBold 10" foreground="%s">%d%%</span>',
+        FG_MAIN, vol_state.pct or 0))
     local len = media.length or 0
     seek.sensitive = len > 0 -- no mpris:length (streams): no seeking
-    if len > 0 then
-        if not seek_dragging and GLib.get_monotonic_time() / 1000 >= seek_hold_until then
-            media_syncing = true
-            seek:set_value(math.floor((media.position or 0) / len * 1000 + 0.5))
-            media_syncing = nil
-        end
-        set_markup_now(time_cur, string.format(
-            '<span font="Inter Medium 9" foreground="%s">%s</span>',
-            FG_MUTED, fmt_us(media.position)))
-        set_markup_now(time_tot, string.format(
-            '<span font="Inter Medium 9" foreground="%s">%s</span>',
-            FG_MUTED, fmt_us(len)))
-    end
+    sync_seek()
     if not vol_dragging then
         vol_syncing = true
         vol:set_value(vol_state.pct or 0)
@@ -790,31 +1025,11 @@ local media_content = wibox.widget{
 }
 media_content.forced_width = 308
 
-media_popup = awful.popup{
-    widget = media_content,
-    ontop  = true,
-    type   = "dock",
-    visible = false,
-    bg     = "#1c1c1f",
-    shape  = gears.shape.rounded_rect,
-    border_width = 0,
-    preferred_positions = "bottom",
-    preferred_anchors  = "middle", -- centred under the bar
-}
-media_popup:connect_signal("mouse::leave", function() close_media() end)
-
 function close_media()
     if not media_open then return end
     media_open = false
+    popover_mgr.close("media")
     if pos_timer.started then pos_timer:stop() end
-    anim.tween{ tag = "media_popup", duration = 0.12, step = function(t)
-        media_popup.opacity = 1 - t
-    end, done = function()
-        if media_popup and not media_open then
-            media_popup.visible = false
-            media_popup.opacity = 1
-        end
-    end }
 end
 
 function toggle_media()
@@ -822,23 +1037,30 @@ function toggle_media()
 end
 
 function open_media()
-    if not song_text.visible then return end -- nothing playing, nothing to control
-    -- One popover at a time (lazy require: control_center requires
-    -- frostbar's exports, so a top-level require would be a cycle).
-    pcall(function() require("control_center").close() end)
+    if not media.has then return end -- nothing playing, nothing to control
+    -- One surface at a time across the whole bar; placement, animation and
+    -- dismissal belong to the shared surface manager.
+    media_open = true
+    popover_mgr.show{
+        id = "media",
+        content = media_content,
+        width = 308,
+        modal = true,
+        on_open = function()
+            media_open = true
+            if not pos_timer.started then pos_timer:start() end
+        end,
+        on_close = function()
+            media_open = false
+            if pos_timer.started then pos_timer:stop() end
+        end,
+        refresh = refresh_media_ui,
+    }
     refresh_media_ui()
     poll_song() -- fresh position/length right away
-    -- Anchor to the bar on the screen under the pointer (the one that was
-    -- clicked), not the focused client's screen.
-    local s = mouse.screen or awful.screen.focused()
-    if not s then return end
-    media_popup:move_next_to(s.mywibox)
-    media_open = true
-    if not pos_timer.started then pos_timer:start() end
-    anim.tween{ tag = "media_popup", duration = 0.18, step = function(t)
-        media_popup.opacity = t
-    end }
 end
+
+
 
 -- Clicking the volume indicator raises the window that owns the MPRIS
 -- player: the PID owning the D-Bus name matches an awesome client's pid,
@@ -857,7 +1079,13 @@ function focus_player()
                 local class = (c.class or ""):lower()
                 if (pid and c.pid == pid) or class:find(target, 1, true) then
                     if c.minimized then c.minimized = false end
-                    c:jump_to() -- switches to its tag, raises and focuses it
+                    if not c:isvisible() and c.first_tag then
+                        c.first_tag:view_only() -- reveal on its own monitor
+                    end
+                    -- Activate WITHOUT jump_to: jump_to calls screen.focus,
+                    -- which warps the pointer to the player's monitor.
+                    c:emit_signal("request::activate", "aether_volume",
+                                  { raise = true })
                     return
                 end
             end
@@ -868,5 +1096,8 @@ end
 function M.close_media()
     close_media()
 end
+
+-- Debug/state access for awesome-client diagnostics.
+M.poll_debug = function() return vol_bar_dragging, vol_state.pct end
 
 return M

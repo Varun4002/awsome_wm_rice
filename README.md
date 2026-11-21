@@ -46,3 +46,35 @@ journalctl --user -b --no-pager | grep 'E: awesome' | tail -20
 See `docs/01-rollback.md`. Short version: every commit in this repo is a
 working state; `git checkout <commit> -- .` restores one file set, and
 `~/.local/share/aether/backups/` holds a pre-AETHER tarball.
+
+# awsome_wm_rice
+
+Full backup of the **AETHER** AwesomeWM 4.3 (X11) rice, including everything
+built on 2026-11-21:
+
+## Modules
+| file | role |
+|---|---|
+| `rc.lua` | tag table (`.` showcase + 1–9), bar assembly, keybinds, client rules |
+| `frostbar.lua` | frosted-glass bar backdrop; now-playing mini-player (play/pause, time, seekbar); press-drag volume scrub with OSD; media popover |
+| `workspaces.lua` | workspace pills (dot + 1–9), hover previews, workspace actions |
+| `windower.lua` | per-screen active-window block + window control surface |
+| `dotworkspace.lua` | `"."` wallpaper-showcase policy: central app routing, Starlight/Launchpad exemption, wallpaper-derived accent, idempotent tag reconcile |
+| `dragtransfer.lua` | drag-aware Super+Tab: screen-local tag cycling, cross-monitor window transfer, under-bar drag clamp |
+| `opencode.lua` / `opencode_ui.lua` | OpenCode integration: sessions + OpenCode Go usage windows (5-hour / weekly / monthly) |
+| `widgets/` | animated slider suite: base engine, volume (wpctl + pw-mon), brightness, media seekbar (playerctl -F) |
+| `clock.lua` | two-line 12-hour clock + calendar surface |
+| `panel.lua`, `control_center.lua`, `popover.lua`, `ui.lua`, `glass.lua`, `launchers.lua`, `anim.lua`, `wallpaper_cycler.lua` | five-layer bar surfaces, design tokens, compositor lifecycle, launchers, wallpaper crossfades |
+| `docs/` | audit, defects, verification, performance notes, dot-workspace/drag-transfer spec |
+| `system/`, `tools/` | dual-display session script, picom config, benchmarks |
+
+## Runtime dependencies
+awesome 4.3 · picom · kitty · starlight and launchpad (wrapper scripts in
+`~/.local/bin`) · PipeWire (`wpctl`, `pw-mon`) · `playerctl` · `brightnessctl` ·
+ImageMagick (`magick`) · `xdotool` · `curl` + `jq` · lua-lgi + lfs.
+
+## Keybindings (highlights)
+`Super+Tab` next tag on the focused screen — during a window drag it transfers
+the dragged window to the other monitor · `Super+D` dot wallpaper showcase ·
+`Alt+Space` Starlight · `Super+E` Launchpad · `Super+A` AETHER panel ·
+`Super+Space` next layout · `Print` screenshot · `Super+Q` close window.
