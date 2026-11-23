@@ -94,13 +94,22 @@ output_connected() {
 # GNOME login (notably XDG_SESSION_TYPE=wayland).  Chromium-based apps pick
 # their ozone platform from that, so export the real X11 values and push them
 # into the systemd manager and D-Bus activation environment.
+#
+# systemctl only accepts NAME=VALUE pairs here; the bare-name form used
+# before failed with "Invalid environment assignments" on every login and
+# was silently ignored (dbus-update-activation-environment does accept bare
+# names, so it is left as-is).
 export XDG_SESSION_TYPE=x11
 export XDG_CURRENT_DESKTOP=awesome
 export DESKTOP_SESSION=awesome-dual
 export XDG_SESSION_DESKTOP=awesome-dual
 
 systemctl --user set-environment \
-    XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DESKTOP_SESSION XDG_SESSION_DESKTOP DISPLAY 2>>"$LOG"
+    XDG_SESSION_TYPE="$XDG_SESSION_TYPE" \
+    XDG_CURRENT_DESKTOP="$XDG_CURRENT_DESKTOP" \
+    DESKTOP_SESSION="$DESKTOP_SESSION" \
+    XDG_SESSION_DESKTOP="$XDG_SESSION_DESKTOP" \
+    DISPLAY="$DISPLAY" 2>>"$LOG"
 dbus-update-activation-environment --systemd \
     XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DESKTOP_SESSION XDG_SESSION_DESKTOP DISPLAY 2>>"$LOG"
 

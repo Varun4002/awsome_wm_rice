@@ -390,6 +390,16 @@ local function attach(s)
     st.widget = make_painter(st)
     wb:set_widget(st.widget)  -- required: the drawable repaints what a widget marks dirty
     screens[s] = st
+    -- attach() runs for screens that appear after setup too (second monitor
+    -- enabled at runtime, RandR hotplug).  Such a screen has no frame yet and
+    -- paint_frame would fill it black until the next 30 minute switch, so give
+    -- it the current wallpaper immediately.  At setup time current_path is
+    -- still nil and show_initial() paints every screen itself.
+    if current_path then
+        st.cur = prepare(current_path, g) or st.cur
+        repaint(st)
+        sync_root()
+    end
 end
 
 local function on_removed(s)

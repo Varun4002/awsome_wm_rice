@@ -30,6 +30,7 @@ local gears     = require("gears")
 local wibox     = require("wibox")
 local gstring   = require("gears.string")
 local gsurface = require("gears.surface")
+local naughty   = require("naughty")
 
 local M = {}
 
@@ -118,6 +119,19 @@ local function apply_theme()
         gears.shape.rounded_rect(cr, w, h, 12)
     end
     beautiful.notification_font = "Inter Medium 10"
+
+    -- awesome 4.3 resolves notification icon *names* against
+    -- naughty.config.icon_dirs, which defaults to {"/usr/share/pixmaps/"} with
+    -- png/gif only.  A themed name such as "audio-headset" therefore misses
+    -- the search list, falls through to surface.load_uncached and logs
+    -- "E: awesome: Failed to load 'audio-headset'" plus a traceback for every
+    -- such notification (blueman, NetworkManager, ...).  Point the lookup at
+    -- the installed icon theme in the formats it ships, and give naughty an
+    -- icon size: geticonpath only probes <dir><size>x<size>/<type>/ when the
+    -- size is known, and that is where the theme keeps these icons.
+    naughty.config.icon_dirs = { "/usr/share/icons/Papirus/", "/usr/share/pixmaps/" }
+    naughty.config.icon_formats = { "png", "svg", "gif" }
+    beautiful.notification_icon_size = 48
 
     beautiful.tooltip_bg_color = "#0e1014e6"
     beautiful.tooltip_fg_color = "#e6e8ee"
