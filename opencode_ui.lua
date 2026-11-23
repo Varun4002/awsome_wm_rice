@@ -400,6 +400,7 @@ local function open_surface(opts)
         content = body,
         width = 360,
         modal = true,
+        reopen = function() open_surface({ refresh = true }) end,
     }
 end
 M.open_surface = open_surface
@@ -418,14 +419,25 @@ local function paint_entry(e)
     local st = oc.state
     local s = status_of(st)
     local project = project_of(st)
+    local width = e.screen and e.screen.valid and e.screen.geometry
+                  and e.screen.geometry.width
+    local budget = ui.bar_budget(width)
 
     e.dot.bg = s.color
     e.dot.opacity = (st.status == "offline") and 0.5 or 1
 
+    -- S2: never present data as live when the polls have stopped arriving.
+    -- Three intervals of silence is the line between "in flight" and "stale".
+    local interval = st.reachable and oc.config.poll_idle or oc.config.poll_offline
+    local stale = st.updated_at > 0 and (os.time() - st.updated_at) > 3 * interval
+
     local text = "opencode"
     local color = st.reachable and ui.color.text_dim or ui.color.text_faint
     local glyph -- optional FA glyph before the label (U6)
-    if st.status == "waiting" and st.pending.total > 0 then
+    if stale then
+        text = "opencode · stale"
+        color = ui.color.text_faint
+    elseif st.status == "waiting" and st.pending.total > 0 then
         -- Glyph prefix so "· 1" reads as "something needs you", not as a
         -- session counter (U6).
         glyph = "\u{f12a}" -- fa-exclamation, same family the bar already uses
@@ -441,9 +453,12 @@ local function paint_entry(e)
         text = "opencode · " .. project
         color = ui.color.text_dim
     end
+    if not budget.project and text ~= "opencode · stale" then
+        text = "opencode" -- narrower bar: the dot carries the state
+    end
     if glyph then
         ui.set_markup(e.label, string.format(
-            '<span font="FontAwesome 9" foreground="%s">%s</span>'
+            '<span font="' .. ui.glyph_font.s .. '" foreground="%s">%s</span>'
                 .. '<span font="%s" foreground="%s"> %s</span>',
             color, ui.esc(glyph), ui.font.small, color, ui.esc(text)))
     else
@@ -468,7 +483,7 @@ function M.bar_widget(s)
     local root = wibox.container.background()
     root.shape = ui.radius_shape.card
     root.bg = ui.color.transparent
-    root.forced_height = 26
+    root.forced_height = ui.block_h
     root.widget = wibox.container.place(wibox.widget{
         { dot, right = 7, widget = wibox.container.margin },
         label,

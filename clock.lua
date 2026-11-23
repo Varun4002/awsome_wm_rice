@@ -36,9 +36,24 @@ local function paint(now)
     local full = os.date("%A, %d %B %Y", now):gsub(", 0", ", ")
     for i = #targets, 1, -1 do
         local t = targets[i]
-        ui.set_text(t.time, time, ui.color.text, t.font or ui.font.strong)
-        if t.date then ui.set_text(t.date, date, ui.color.text_dim, ui.font.tiny) end
-        if t.full then ui.set_text(t.full, full, ui.color.text_dim, ui.font.small) end
+        if t.combined then
+            -- One line, one baseline: the date and the time share a Pango
+            -- line, so they cannot drift apart (continuity K1).  A two-line
+            -- clock is a second ink axis that 38 px cannot afford.
+            local budget = t.budget or { date = true }
+            local head = budget.date
+                and ('<span foreground="' .. ui.color.text_faint ..
+                     '" font="' .. ui.font.tiny .. '">' .. ui.esc(date) ..
+                     '</span>  ')
+                or ""
+            ui.set_markup(t.time, head ..
+                '<span foreground="' .. ui.color.text ..
+                '" font="' .. ui.font.clock .. '">' .. ui.esc(time) .. '</span>')
+        else
+            ui.set_text(t.time, time, ui.color.text, t.font or ui.font.strong)
+            if t.date then ui.set_text(t.date, date, ui.color.text_dim, ui.font.tiny) end
+            if t.full then ui.set_text(t.full, full, ui.color.text_dim, ui.font.small) end
+        end
     end
 end
 
@@ -56,9 +71,14 @@ local function schedule()
 end
 
 --- Register textboxes that follow the clock.  Returns a detach function.
+-- opts.combined renders the whole clock into `time_tb` as one line (date +
+-- time in one Pango line, so both share a baseline); opts.budget is the
+-- bar's composition budget from ui.bar_budget.
 function M.attach(time_tb, date_tb, full_tb, opts)
+    opts = opts or {}
     local entry = { time = time_tb, date = date_tb, full = full_tb,
-                    font = opts and opts.font }
+                    font = opts.font, combined = opts.combined,
+                    budget = opts.budget }
     targets[#targets + 1] = entry
     paint(os.time())
     return function()
@@ -109,20 +129,23 @@ end
 
 -------------------------------------------------------------------------- public
 
---- Two-line ambient clock for a screen's bar.
-function M.widget()
-    local time = ui.text{ font = ui.font.strong, align = "right", width = 64 }
-    local date = ui.text{ font = ui.font.tiny, align = "right", width = 64 }
-    local column = wibox.widget{
-        time, date,
-        layout = wibox.layout.fixed.vertical,
-        spacing = 0,
-    }
+local function open_detail()
+    local spec = build_detail()
+    spec.id = "clock-detail"
+    spec.modal = true
+    spec.reopen = open_detail
+    popover.show(spec)
+end
+
+--- The ambient clock for a screen's bar: one line, date then time.
+function M.widget(s)
+    local line = ui.text{ font = ui.font.clock, align = "right" }
     local root = wibox.container.background()
     root.shape = ui.radius_shape.chip
     root.bg = ui.color.transparent
     root.forced_height = ui.block_h
-    root.widget = wibox.container.place(ui.pad(column, 6, 8, 0, 0))
+    root.widget = wibox.container.place(
+        ui.pad(line, ui.space.s, ui.space.s, 0, 0))
 
     ui.hover(root, function() return ui.color.transparent end, ui.color.hover)
 
@@ -131,15 +154,15 @@ function M.widget()
             popover.close("toggle")
             return
         end
-        local spec = build_detail()
-        spec.id = "clock-detail"
-        spec.modal = true
-        popover.show(spec)
+        open_detail()
     end)))
 
     popover.hover(root, "clock-detail", build_detail)
 
-    M.attach(time, date)
+    M.attach(line, nil, nil, {
+        combined = true,
+        budget = ui.bar_budget(s and s.geometry and s.geometry.width),
+    })
     return root
 end
 

@@ -53,11 +53,12 @@ pcall(function() require("gears.filesystem").make_directories(CACHE_DIR) end)
 -- Look & feel.  Foregrounds/fonts come from the ui token palette so the
 -- bar's media/volume text matches every popover; FALLBACK is the pre-frost
 -- paint color, and is also the wibar bg rc.lua shows under the systray.
-local TINT_ALPHA       = 0.38
+local TINT_ALPHA       = 0.60 -- graphite scrim over the blur: at 0.38 a bright
+                              -- wallpaper left #7c8490 text at ~2.5:1
 local HAIRLINE_ALPHA   = 0.10
 local HIGHLIGHT_ALPHA  = 0.05
 local FALLBACK         = { 14 / 255, 14 / 255, 16 / 255 } -- #0e0e10
-M.fallback_bg          = "#0e0e10"
+M.fallback_bg          = ui.color.bg_bar
 local FG_MAIN          = ui.color.text
 local FG_MUTED         = ui.color.text_dim
 local FONT_MAIN        = ui.font.body
@@ -394,19 +395,24 @@ local FA_PREV, FA_PLAY, FA_PAUSE, FA_NEXT = "\u{f048}", "\u{f04b}", "\u{f04c}", 
 local attach_seek, sync_seek
 
 local function render_song()
-    local markup, visible
-    if media.has then
-        local glyph = (media.status == "Playing") and "▶" or "❚❚"
-        local text = cap((media.artist ~= nil and media.artist .. " — " or "")
-                         .. (media.title or ""))
-        markup = string.format(
-            '<span foreground="%s">%s</span> <span foreground="%s">%s</span> ' ..
-            '<span foreground="%s">%s</span>',
-            FG_MUTED, esc(pretty_app(media.player) or "Now Playing"),
-            FG_MUTED, glyph, FG_MAIN, esc(text))
-        visible = true
-    end
+    local visible = media.has == true
     for _, w in ipairs(song_widgets) do
+        local markup
+        if visible then
+            local glyph = (media.status == "Playing") and "▶" or "❚❚"
+            -- The title cap comes from the bar's width budget, so the 1680
+            -- monitor drops characters instead of overflowing (layout-grid G7).
+            local limit = w.budget and w.budget.song or SONG_MAX
+            local text = cap((media.artist ~= nil and media.artist .. " — " or "")
+                             .. (media.title or ""), limit)
+            local app = pretty_app(media.player) or "Now Playing"
+            markup = limit > 0 and string.format(
+                '<span foreground="%s">%s</span> <span foreground="%s">%s</span> ' ..
+                '<span foreground="%s">%s</span>',
+                FG_MUTED, esc(app),
+                FG_MUTED, glyph, FG_MAIN, esc(text))
+                or esc(app)
+        end
         if markup and w.text._private.frost_markup ~= markup then
             w.text._private.frost_markup = markup
             w.text:set_markup_silently(markup)
@@ -430,7 +436,7 @@ end
 --- New now-playing mini-player for one screen's bar: track, play/pause,
 -- elapsed/total time and a seekbar, all inline (the media card keeps the
 -- full controls).
-function M.new_song()
+function M.new_song(s)
     local text = wibox.widget.textbox()
     text.font = FONT_MAIN
     text.ellipsize = "end"
@@ -444,7 +450,7 @@ function M.new_song()
         awful.button({}, 5, function() awful.spawn.with_shell("playerctl previous") end)
     ))
     local play = wibox.widget.textbox()
-    play.font = "FontAwesome 10"
+    play.font = ui.glyph_font.m
     play.forced_width = 16
     play:buttons(gears.table.join(awful.button({}, 1, function()
         awful.spawn.with_shell("playerctl play-pause") end)))
@@ -463,7 +469,8 @@ function M.new_song()
     local box = spaced(row, 8, 8)
     box.visible = false
     song_widgets[#song_widgets + 1] =
-        { text = text, play = play, time = time, bar = bar, box = box }
+        { text = text, play = play, time = time, bar = bar, box = box,
+          budget = ui.bar_budget(s and s.geometry and s.geometry.width) }
     render_song()
     return box
 end
@@ -472,14 +479,16 @@ end
 -- 38px bar could wrap to 2 lines; a character cap keeps it to one line.
 -- (Shorter cap now that the mini-player carries the extra controls.)
 local SONG_MAX = 26
-cap = function(s)
+cap = function(s, limit)
+    limit = limit or SONG_MAX
+    if limit <= 0 then return "" end
     local n = utf8.len(s)
-    if not n or n <= SONG_MAX then return s end
-    local ok, off = pcall(utf8.offset, s, SONG_MAX)
+    if not n or n <= limit then return s end
+    local ok, off = pcall(utf8.offset, s, limit)
     if ok and off then
         return s:sub(1, off - 1) .. "…"
     end
-    return s:sub(1, SONG_MAX) .. "…"
+    return s:sub(1, limit) .. "…"
 end
 
 local function poll_song()
@@ -541,7 +550,7 @@ local function render_volume()
         -- Muted renders as the word, not a lying "0%" (U6).
         local label = muted and "  muted" or string.format("  %d%%", pct)
         markup = string.format(
-            '<span font="FontAwesome 10" foreground="%s">%s</span>' ..
+            '<span font="' .. ui.glyph_font.m .. '" foreground="%s">%s</span>' ..
             '<span font="%s" foreground="%s">%s</span>',
             fg, glyph, ui.font.body, fg, label)
     end
@@ -639,7 +648,7 @@ local OSD_W, OSD_H = 208, 44
 
 local function make_osd()
     osd_glyph = wibox.widget.textbox()
-    osd_glyph.font = "FontAwesome 13"
+    osd_glyph.font = ui.glyph_font.m
     osd_glyph.forced_width = 16
     osd_pct = wibox.widget.textbox()
     osd_pct.font = ui.font.clock
@@ -653,7 +662,7 @@ local function make_osd()
     osd_bar.shape            = gears.shape.rounded_rect
     osd_bar.bar_shape        = gears.shape.rounded_rect
     osd_bar.forced_width  = 104
-    osd_bar.forced_height = 6
+    osd_bar.forced_height = 4
     osd = wibox{
         ontop = true, visible = false, type = "menu", -- picom: blur + shadow
         bg = ui.color.bg_popup,
@@ -676,7 +685,7 @@ end
 local function osd_paint(pct)
     osd_bar.value = pct
     local gmark = string.format(
-        '<span font="FontAwesome 13" foreground="%s">%s</span>',
+        '<span font="' .. ui.glyph_font.m .. '" foreground="%s">%s</span>',
         FG_MAIN, vol_glyph(pct))
     if osd_glyph._private.frost_markup ~= gmark then
         osd_glyph._private.frost_markup = gmark
@@ -803,9 +812,9 @@ local function set_markup_now(widget, str)
     widget:set_markup_silently(str)
 end
 
-local function glyph_button(glyph, size, color)
+local function glyph_button(glyph, font, color)
     local b = wibox.widget.textbox()
-    b.font = "FontAwesome " .. (size or 12)
+    b.font = font or ui.glyph_font.m
     b:set_markup_silently(string.format('<span foreground="%s">%s</span>', color or FG_MAIN, glyph))
     return b
 end
@@ -835,9 +844,9 @@ time_cur.font = ui.font.small
 local time_tot = wibox.widget.textbox()
 time_tot.font = ui.font.small
 
-local btn_prev = glyph_button(FA_PREV, 12, FG_MUTED)
-local btn_play = glyph_button(FA_PLAY, 17)
-local btn_next = glyph_button(FA_NEXT, 12, FG_MUTED)
+local btn_prev = glyph_button(FA_PREV, ui.glyph_font.m, FG_MUTED)
+local btn_play = glyph_button(FA_PLAY, ui.glyph_font.l)
+local btn_next = glyph_button(FA_NEXT, ui.glyph_font.m, FG_MUTED)
 btn_prev:buttons(gears.table.join(awful.button({}, 1, function()
     awful.spawn.with_shell("playerctl previous") end)))
 btn_play:buttons(gears.table.join(awful.button({}, 1, function()
@@ -854,7 +863,7 @@ local vol = ui.slider{
 }
 local vol_pct = wibox.widget.textbox()
 vol_pct.font = ui.font.strong
-local btn_mute = glyph_button(FA_VOLUP, 12, FG_MUTED)
+local btn_mute = glyph_button(FA_VOLUP, ui.glyph_font.m, FG_MUTED)
 btn_mute:buttons(gears.table.join(awful.button({}, 1, function()
     volume_change("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle") end)))
 
@@ -972,10 +981,10 @@ function refresh_media_ui()
         '<span font="%s" foreground="%s">%s</span>',
         ui.font.body, FG_MUTED, esc(media.artist or "")))
     set_markup_now(btn_play, string.format(
-        '<span font="FontAwesome 17" foreground="%s">%s</span>', FG_MAIN,
+        '<span font="' .. ui.glyph_font.l .. '" foreground="%s">%s</span>', FG_MAIN,
         media.status == "Playing" and FA_PAUSE or FA_PLAY))
     set_markup_now(btn_mute, string.format(
-        '<span font="FontAwesome 12" foreground="%s">%s</span>', FG_MUTED,
+        '<span font="' .. ui.glyph_font.m .. '" foreground="%s">%s</span>', FG_MUTED,
         vol_state.muted and FA_VOLMUTE or FA_VOLUP))
     set_markup_now(vol_pct, string.format(
         '<span font="%s" foreground="%s">%d%%</span>',
@@ -1051,6 +1060,7 @@ function open_media()
         content = media_content,
         width = 308,
         modal = true,
+        reopen = open_media,
         on_open = function()
             media_open = true
             if not pos_timer.started then pos_timer:start() end

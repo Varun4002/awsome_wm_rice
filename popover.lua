@@ -34,6 +34,15 @@ local hover_close = {} -- id -> timer
 local hover_open  = {} -- id -> timer
 local generation = 0
 
+-- Back-stack (navigation N8 / flow FL4): opening a modal surface over another
+-- modal surface used to destroy the first one, so there was no way back to it.
+-- Entries hold the *opener*, not the content: a surface is rebuilt on return,
+-- which keeps its timers and subscriptions living exactly as long as it is
+-- visible, and makes the stack a list of destinations rather than of widgets.
+local back_stack = {}
+local backing = false
+local BACK_DEPTH = 2
+
 local HOVER_DELAY = 0.14
 local HOVER_CLOSE = 0.10
 
@@ -234,6 +243,13 @@ function M.show(spec)
     if not popup then popup = make_popup() end
 
     if current and current.id ~= spec.id then
+        -- Remember where we came from before the old surface is disposed, so
+        -- BackSpace/Back can rebuild it (only modal→modal is a real layer
+        -- transition; a hover reveal is not a destination).
+        if not backing and spec.modal and current.modal and current.spec.reopen then
+            back_stack[#back_stack + 1] = { id = current.id, reopen = current.spec.reopen }
+            while #back_stack > BACK_DEPTH do table.remove(back_stack, 1) end
+        end
         local old = current
         current = nil
         if old.spec.on_close then pcall(old.spec.on_close, "replace") end
@@ -265,6 +281,7 @@ end
 
 function M.close(reason)
     if not current then return end
+    back_stack = {}
     local old = current
     current = nil
     if old.spec.on_close then pcall(old.spec.on_close, reason or "close") end
@@ -280,6 +297,33 @@ end
 
 function M.close_all()
     M.close("close_all")
+end
+
+--- Up one layer: rebuild the modal surface this one replaced.  Returns true if
+-- there was somewhere to go.  Surfaces opt in by setting `spec.reopen` to their
+-- own opener; a surface that does not set it simply has no parent layer.
+function M.back()
+    local entry = table.remove(back_stack)
+    if not entry or not entry.reopen then return false end
+    backing = true
+    local ok = pcall(entry.reopen)
+    backing = false
+    return ok
+end
+
+function M.can_back()
+    return #back_stack > 0
+end
+
+--- The live popover's content widget, for QA probes (tree walks).
+function M.content()
+    return popup and popup.widget
+end
+
+--- Geometry of the live popover, for QA probes and tools/qa.sh --live.
+function M.geometry()
+    if not popup or not popup.visible then return nil end
+    return { x = popup.x, y = popup.y, width = popup.width, height = popup.height }
 end
 
 -------------------------------------------------------------------------- hover helper

@@ -113,4 +113,21 @@ systemctl --user set-environment \
 dbus-update-activation-environment --systemd \
     XDG_SESSION_TYPE XDG_CURRENT_DESKTOP DESKTOP_SESSION XDG_SESSION_DESKTOP DISPLAY 2>>"$LOG"
 
+# FL5: when ~/.config/awesome/rc.lua fails to load, awesome silently falls back
+# to /etc/xdg/awesome/rc.lua - no bar, no keybindings, no explanation.  A helper
+# process (survives the exec below) checks the config marker a few seconds in
+# and says so once, with the path to the record folder.
+(
+    sleep 6
+    marker=$(timeout 4 awesome-client 'return AETHER_RC_MARKER or "none"' 2>/dev/null)
+    case "$marker" in
+        *dot-v1*) echo "config marker ok" ;;
+        *)  echo "config marker MISSING (got: ${marker:-no answer})"
+            notify-send -u critical -a AETHER "AETHER failed to load" \
+                "awesome is running the stock fallback config.
+See ~/.config/awesome/.skills_upgrades/ and the journal for E: awesome." 2>/dev/null || true
+            ;;
+    esac
+) >>"$LOG" 2>&1 &
+
 exec awesome

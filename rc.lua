@@ -35,6 +35,7 @@ local clock       = require("clock")
 local opencode    = require("opencode")
 local opencode_ui = require("opencode_ui")
 local panel       = require("panel")
+local launchers   = require("launchers")
 -- Enable hotkeys help widget for VIM and other apps
 -- when client with a matching name is opened:
 require("awful.hotkeys_popup.keys")
@@ -83,7 +84,7 @@ beautiful.taglist_bg_focus  = ui.color.transparent
 beautiful.taglist_fg_normal = ui.color.text_dim
 beautiful.taglist_fg_focus  = ui.color.text
 beautiful.tasklist_bg_normal = ui.color.transparent
-beautiful.tasklist_bg_focus  = "#3a3a3c60"
+beautiful.tasklist_bg_focus  = ui.color.active
 beautiful.tasklist_fg_normal = ui.color.text_dim
 beautiful.tasklist_fg_focus  = ui.color.text
 
@@ -172,7 +173,7 @@ menubar.utils.terminal = terminal -- Set the terminal for applications that requ
 
 local function aether_mark()
     local label = ui.text{ font = ui.font.mark }
-    ui.set_text(label, "AETHER", ui.color.text_dim, ui.font.mark)
+    ui.set_text(label, "AETHER", ui.color.text, ui.font.mark)
 
     local root = wibox.container.background()
     root.shape = ui.radius_shape.chip
@@ -182,11 +183,11 @@ local function aether_mark()
         { ui.dot(ui.color.accent, 5), right = 8, widget = wibox.container.margin },
         label,
         layout = wibox.layout.fixed.horizontal,
-    }, 7, 10, 0, 0))
+    }, 8, 8, 0, 0))
 
     ui.hover(root, function() return ui.color.transparent end, ui.color.hover,
-        function() ui.set_text(label, "AETHER", ui.color.text, ui.font.mark) end,
-        function() ui.set_text(label, "AETHER", ui.color.text_dim, ui.font.mark) end)
+        function() ui.set_text(label, "AETHER", ui.color.text_strong, ui.font.mark) end,
+        function() ui.set_text(label, "AETHER", ui.color.text, ui.font.mark) end)
 
     -- Left click: the expanded intelligence panel (layer 4).  Right click:
     -- the existing main menu, so the awesome menu is still one gesture away.
@@ -245,6 +246,13 @@ awful.screen.connect_for_each_screen(function(s)
     -- shared between two hierarchies).
     local keyboardlayout = awful.widget.keyboardlayout()
 
+    -- Systray: awesome 4.3 has a single tray instance and no client count, and
+    -- it *fits icons to the available cell*: a fixed 22 px cell shrank two
+    -- icons to 11 px each (illegible).  Fix the icon size and let the cell size
+    -- itself to its content instead (bar-aesthetic Q2).
+    local tray = wibox.widget.systray()
+    tray:set_base_size(20)
+
     -- Create the wibox
     -- height must be passed in the constructor: the wibar's attached
     -- placement reverts later runtime height changes.
@@ -260,13 +268,60 @@ awful.screen.connect_for_each_screen(function(s)
     -- Layer 1 assembly.  The centre slot of align.horizontal is centred on
     -- the whole bar width, so the active-window block stays optically
     -- centred while the side clusters grow and shrink.
+    --
+    -- Each cluster is wrapped in one `place` with valign="center": a fixed
+    -- layout hands its children the full bar height, so every block used to
+    -- centre itself independently and the bar carried two ink baselines 2 px
+    -- apart (continuity K1).  One place per cluster gives all three one centre.
+    local space = ui.space
+    local left = wibox.widget{
+        layout = wibox.layout.fixed.horizontal,
+        aether_mark(),
+        workspaces.widget(s),
+        { workspaces.other_screen(s), left = space.s, widget = wibox.container.margin },
+        s.mypromptbox,
+    }
+    local right = wibox.widget{
+        layout = wibox.layout.fixed.horizontal,
+        frostbar.new_song(s),
+        opencode_ui.bar_widget(s),
+        ui.pad(ui.vrule(ui.space.l), space.m, space.m, 0, 0),
+        frostbar.new_volume(),
+        ui.pad(ui.vrule(ui.space.l), space.m, space.m, 0, 0),
+        ui.pad(keyboardlayout, 0, space.xs, 0, 0),
+        -- The layout indicator draws its own 16x12 diagram; left unwrapped in
+        -- a fixed row it was stretched to the full bar height and became the
+        -- bar's largest graphic again (U1 regression).
+        ui.cell(ui.pad(s.mylayoutbox, 0, space.xs, 0, 0)),
+        -- Tray as a designed sunken cell: 4.3 has one systray and no client
+        -- count, so screen 2 would otherwise show an unexplained gap.  The
+        -- cell sizes itself to its icons (no forced width: a fixed one
+        -- squeezed two 20 px icons into 22 px total).
+        -- NOT wrapped in ui.cell: a place fits the systray, and when that fit
+        -- is 0 the tray's draw divides by zero entries and the C call rejects
+        -- the size (systray.lua:72).  A margin container passes the row
+        -- height through instead, which is what the tray wants.
+        wibox.widget{
+            {
+                tray,
+                margins = 2,
+                widget  = wibox.container.margin,
+            },
+            bg = ui.color.bg_sunken,
+            shape = ui.radius_shape.chip,
+            widget = wibox.container.background,
+        },
+        ui.pad(ui.vrule(ui.space.l), space.m, space.m, 0, 0),
+        control_center.new_button(),
+        ui.pad(ui.vrule(ui.space.l), space.m, space.m, 0, 0),
+        clock.widget(s),
+    }
     s.mywibox:setup {
         layout = wibox.layout.align.horizontal,
-        { -- Left: identity, workspaces, prompt
-            layout = wibox.layout.fixed.horizontal,
-            aether_mark(),
-            workspaces.widget(s),
-            s.mypromptbox,
+        { -- Left: identity, workspaces, other screen, prompt
+            layout = wibox.container.place,
+            halign = "left", valign = "center",
+            left,
         },
         { -- Centre: the screen's active window (layer 1-3 anchor)
             layout = wibox.container.place,
@@ -277,32 +332,9 @@ awful.screen.connect_for_each_screen(function(s)
         { -- Right: media · OpenCode | audio | keyboard · layout · tray |
           -- controls | clock.  Thin rules separate the functional groups so
           -- the cluster reads as one interface instead of a pile of glyphs.
-            layout = wibox.layout.fixed.horizontal,
-            frostbar.new_song(),
-            opencode_ui.bar_widget(s),
-            ui.pad(ui.vrule(16), 8, 8, 0, 0),
-            frostbar.new_volume(),
-            ui.pad(ui.vrule(16), 8, 8, 0, 0),
-            ui.pad(keyboardlayout, 0, 6, 0, 0),
-            ui.pad(s.mylayoutbox, 0, 4, 0, 0),
-            -- Tray as a designed sunken cell: 4.3 has one systray and no
-            -- client count, so screen 2 would otherwise show an unexplained
-            -- gap.  A fixed-width cell reads as a deliberate empty slot (U3).
-            {
-                {
-                    wibox.widget.systray(),
-                    margins = 4,
-                    widget  = wibox.container.margin,
-                },
-                bg = ui.color.bg_sunken,
-                shape = ui.radius_shape.chip,
-                forced_width = ui.bar_height - 8,
-                widget = wibox.container.background,
-            },
-            ui.pad(ui.vrule(16), 8, 8, 0, 0),
-            control_center.new_button(),
-            ui.pad(ui.vrule(16), 8, 8, 0, 0),
-            clock.widget(),
+            layout = wibox.container.place,
+            halign = "right", valign = "center",
+            right,
         },
     }
 
@@ -410,6 +442,9 @@ root.buttons(gears.table.join(
 -- by the Brave window rule.
 local brave_screen
 
+-- FL3: pending close arming { win = <window id>, at = <os.time()> }.
+local armed_close
+
 globalkeys = gears.table.join(
     awful.key({ modkey,           }, "s",      hotkeys_popup.show_help,
               {description="show help", group="awesome"}),
@@ -425,13 +460,27 @@ globalkeys = gears.table.join(
               {description = "go back", group = "tag"}),
 
     -- Super+D: the dot wallpaper showcase ("show desktop"), screen-local.
+    -- A second press returns to the workspace you came from — before this it
+    -- was one-way and pressing the key again did nothing (flow 5 feedback).
     awful.key({ modkey,           }, "d",
         function ()
             local s = awful.screen.focused()
             local dot = dotws.dot_tag(s)
-            if dot then dot:view_only() end
+            if not dot then return end
+            if dot.selected then
+                local back = s._aether_showcase_return
+                if back and back.valid then
+                    back:view_only()
+                else
+                    dotws.numbered(s, 1):view_only()
+                end
+                s._aether_showcase_return = nil
+            else
+                s._aether_showcase_return = s.selected_tag
+                dot:view_only()
+            end
         end,
-        {description = "dot wallpaper showcase", group = "tag"}),
+        {description = "dot wallpaper showcase (toggle)", group = "tag"}),
 
     awful.key({ modkey,           }, "j",
         function ()
@@ -447,6 +496,23 @@ globalkeys = gears.table.join(
     ),
     awful.key({ modkey,           }, "w", function () mymainmenu:show() end,
               {description = "show main menu", group = "awesome"}),
+
+    -- Mod4+e was bound to Launchpad, which is not installed: the key did
+    -- nothing and a launcher was two dead bindings away (user-flow FL1,
+    -- navigation §3.6).  rofi is the interim searchable launcher until
+    -- Starlight/Launchpad come back; Mod4+Shift+O searches open windows
+    -- (flow FL6: one "where is it?" entry).  Both are registered with the
+    -- rest of the global keys: a deferred re-grab is not reliable after a
+    -- restart (the binding appeared in root.keys() yet never fired).
+    awful.key({ modkey }, "e", function() launchers.search("drun") end,
+              {description = "search applications (rofi)", group = "launcher"}),
+    awful.key({ modkey, "Shift" }, "o", function() launchers.search("window") end,
+              {description = "search open windows (rofi)", group = "launcher"}),
+    awful.key({ modkey }, "b", function ()
+                  brave_screen = mouse.screen
+                  awful.spawn("brave-browser")
+              end,
+              {description = "open brave on screen under pointer", group = "launcher"}),
 
     -- Layout manipulation
     awful.key({ modkey, "Shift"   }, "j", function () awful.client.swap.byidx(  1)    end,
@@ -480,9 +546,31 @@ globalkeys = gears.table.join(
     awful.key({ modkey, "Shift"   }, "q", awesome.quit,
               {description = "quit awesome", group = "awesome"}),
     -- Close the focused application (Mod4+Shift+Q above quits the WM itself).
+    -- Guarded: focus can differ from the window under the pointer (pointer on
+    -- the bar, or focus moved by a keyboard tag switch), so a blind close can
+    -- kill the wrong window.  First press arms and names the target; a second
+    -- press within 3 s closes it (user-flow FL3).
     awful.key({ modkey }, "q",
         function ()
-            if client.focus then client.focus:kill() end
+            local c = client.focus
+            if not c then return end
+            local mc = mouse.coords()
+            local pointer_over = mc.x >= c.x and mc.x < c.x + c.width
+                             and mc.y >= c.y and mc.y < c.y + c.height
+            if pointer_over then c:kill() return end
+            if armed_close and armed_close.win == c.window
+               and os.time() - armed_close.at <= 3 then
+                armed_close = nil
+                c:kill()
+                return
+            end
+            armed_close = { win = c.window, at = os.time() }
+            naughty.notify {
+                title   = "Close this window?",
+                text    = (c.name or c.class or "window") ..
+                          "\nPress Mod4+Q again within 3 s.",
+                timeout = 3,
+            }
         end,
         {description = "close focused app", group = "client"}),
 
@@ -490,6 +578,54 @@ globalkeys = gears.table.join(
     -- client, previously reachable only by clicking its bar block (U5).
     awful.key({ modkey }, "i", windower.open_controls,
               {description = "focused window controls", group = "client"}),
+
+    -- Windows by index (navigation N1).  Mod4+Tab cycles *workspaces* on this
+    -- desktop by design, so window switching lives on the convention every
+    -- other desktop uses: Alt+Tab.  Symmetric pair, no hidden steps.
+    awful.key({ "Mod1" }, "Tab",
+              function () awful.client.focus.byidx(1) end,
+              {description = "next window", group = "client"}),
+    awful.key({ "Mod1", "Shift" }, "Tab",
+              function () awful.client.focus.byidx(-1) end,
+              {description = "previous window", group = "client"}),
+
+    -- One key to the other monitor (navigation N2): with two screens,
+    -- "focus the other one" is the whole gesture; Mod4+Ctrl+j/k stay for
+    -- setups with more than two.
+    awful.key({ modkey }, "grave",
+              function () awful.screen.focus_relative(1) end,
+              {description = "focus the other screen", group = "screen"}),
+
+    -- Hardware keys (navigation N3): a laptop user reaches for these before
+    -- the bar.  They drive the same commands the widgets already use.
+    awful.key({}, "XF86AudioRaiseVolume",
+              function () awful.spawn.with_shell("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+") end,
+              {description = "volume up", group = "media"}),
+    awful.key({}, "XF86AudioLowerVolume",
+              function () awful.spawn.with_shell("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-") end,
+              {description = "volume down", group = "media"}),
+    awful.key({}, "XF86AudioMute",
+              function () awful.spawn.with_shell("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle") end,
+              {description = "mute audio", group = "media"}),
+    awful.key({}, "XF86AudioMicMute",
+              function () awful.spawn.with_shell("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle") end,
+              {description = "mute microphone", group = "media"}),
+    awful.key({}, "XF86AudioPlay",
+              function () awful.spawn.with_shell("playerctl play-pause") end,
+              {description = "play/pause", group = "media"}),
+    awful.key({}, "XF86AudioNext",
+              function () awful.spawn.with_shell("playerctl next") end,
+              {description = "next track", group = "media"}),
+    awful.key({}, "XF86AudioPrev",
+              function () awful.spawn.with_shell("playerctl previous") end,
+              {description = "previous track", group = "media"}),
+    awful.key({}, "XF86MonBrightnessUp",
+              function () awful.spawn.with_shell("brightnessctl -q set +10%") end,
+              {description = "brightness up", group = "media"}),
+    awful.key({}, "XF86MonBrightnessDown",
+              function () awful.spawn.with_shell("brightnessctl -q set 10%-") end,
+              {description = "brightness down", group = "media"}),
+
 
     -- Print saves a full-screen PNG into ~/Pictures/Screenshots.
     awful.key({ }, "Print",
@@ -685,47 +821,42 @@ local modal_escape = awful.key({}, "Escape", function()
     popover.close_all()
 end, {description="dismiss AETHER surface", group="awesome"})
 
+-- BackSpace goes up one layer before it dismisses: the layer stack is the
+-- product's main idea, and without a back action navigating *between* layers
+-- destroyed the previous one (navigation N8 / flow FL4).  With nothing to go
+-- back to it behaves like Escape, so it is never a dead key.
+local modal_back = awful.key({}, "BackSpace", function()
+    if not popover.back() then popover.close_all() end
+end, {description="back to the previous surface", group="awesome"})
+
 local keys_before_modal
 popover.subscribe(function(_, modal)
     if modal and not keys_before_modal then
         keys_before_modal = root.keys()
-        root.keys(gears.table.join(keys_before_modal, modal_escape))
+        root.keys(gears.table.join(keys_before_modal, modal_escape, modal_back))
     elseif not modal and keys_before_modal then
         root.keys(keys_before_modal)
         keys_before_modal = nil
     end
 end)
 
--- Launchers: Starlight search (Alt+Space) and Launchpad (Mod4+e). Placement is
--- owned by launchers.lua — the GTK clients map at a preliminary size and send a
+-- Launchers: Starlight search (Alt+Space) and Launchpad. Placement is owned by
+-- launchers.lua — the GTK clients map at a preliminary size and send a
 -- ConfigureRequest at (0,0), so rule-time placement cannot work
 -- (docs/03-defects.md, D1).
-local launchers = require("launchers")
-
 local function starlight_toggle()
     launchers.spawn("starlight")
 end
 
-local function launchpad_toggle()
-    launchers.spawn("launchpad")
-end
-
--- Alt+Space (starlight) and Mod4+b (brave) are grabbed once the main loop is
--- running rather than at load.  A grab attempted while rc.lua loads (notably
--- during an awesome restart) can fail silently, and awesome then caches the
--- combination as "grabbed" and never retries it — the binding shows up in
--- root.keys() but never fires.
+-- Mod4+b / Mod4+e / Mod4+Shift+O now live in globalkeys above: a deferred
+-- re-grab at 0.5 s could silently fail after a restart (the binding showed up
+-- in root.keys() but never fired), which is exactly how the launcher keys got
+-- lost before.  Alt+Space stays deferred because its GTK client needs the
+-- placement authority installed first (launchers.install below).
 gears.timer.start_new(0.5, function ()
     root.keys(gears.table.join(root.keys(),
         awful.key({ "Mod1" }, "space", starlight_toggle,
-                  {description = "starlight search", group = "launcher"}),
-        awful.key({ modkey }, "e", launchpad_toggle,
-                  {description = "launchpad app grid", group = "launcher"}),
-        awful.key({ modkey }, "b", function ()
-                      brave_screen = mouse.screen
-                      awful.spawn("brave-browser")
-                  end,
-                  {description = "open brave on screen under pointer", group = "launcher"})))
+                  {description = "starlight search", group = "launcher"})))
     return false
 end)
 -- }}}
@@ -859,6 +990,12 @@ gears.timer.start_new(2.5, function()
     for s in screen do
         if s.valid then dotws.ensure_tags(s) end
     end
+    -- Re-grab once the main loop has settled.  A grab requested during config
+    -- load can lose the race (X answers AlreadyGrabbed and awesome caches the
+    -- combination as grabbed): Mod4+e showed up in root.keys() yet never fired
+    -- until an explicit re-registration.  Idempotent, and skipped while a modal
+    -- surface holds the scoped Escape/BackSpace grab.
+    if not popover.any_modal() then root.keys(root.keys()) end
     return false
 end)
 

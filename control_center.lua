@@ -7,8 +7,8 @@
 --   * Wi-Fi:            on/off (nmcli) + the active network name
 --   * Bluetooth:        on/off (bluetoothctl) + the paired devices, each
 --                       clickable to connect / disconnect
---   * Dark mode:        GNOME colour scheme (gsettings), honoured by GTK4
---                       and libadwaita applications
+--   * (No dark-mode switch: AETHER's palette is fixed, so a switch that only
+--      recoloured GTK apps named something it did not do — design-qa F8.)
 --   * Brightness:       hardware backlight slider (brightnessctl via
 --                       passwordless sudo, see docs/03-defects.md D8)
 --   * Volume:           default sink slider + mute (wpctl)
@@ -31,7 +31,6 @@ local M = {}
 local FA_WIFI     = "\u{f1eb}"
 local FA_BT       = "\u{f293}"
 local FA_SUN      = "\u{f185}"
-local FA_MOON     = "\u{f186}"
 local FA_SLIDERS  = "\u{f1de}"
 local FA_VOL      = "\u{f028}"
 local FA_PANEL    = "\u{f108}"
@@ -44,7 +43,6 @@ echo "S $(nmcli --escape=no -t -f NAME,TYPE connection show --active 2>/dev/null
 echo "B $(bluetoothctl show 2>/dev/null | grep -m1 Powered: | grep -oE 'yes|no')"
 echo "L $(brightnessctl -m 2>/dev/null | cut -d, -f4)"
 echo "V $(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null || echo unavailable)"
-echo "K $(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || echo unavailable)"
 bluetoothctl devices Paired 2>/dev/null | sed 's/^Device \([^ ]*\) /P\t\1\t/'
 bluetoothctl devices Connected 2>/dev/null | sed 's/^Device \([^ ]*\) /C\t\1\t/'
 ]]
@@ -59,7 +57,6 @@ local state = {
     bright    = nil,         -- percent
     volume    = nil,         -- percent
     muted     = false,
-    dark      = false,
 }
 
 local refresh_timer -- 2.5 s while open (declared below)
@@ -75,26 +72,35 @@ end
 --- macOS-style switch: rounded pill, knob slides with an ease-out tween.
 local function make_switch(id, on_toggle)
     local checked = false
-    local knob = wibox.widget{
-        bg = ui.color.text_strong, shape = gears.shape.circle,
-        forced_width = 18, forced_height = 18,
-        widget = wibox.container.background,
-    }
+    -- Every level is wrapped in a place: a fixed/align layout hands a child
+    -- the whole row height and ignores forced sizes, so an unwrapped knob is
+    -- painted as a stretched ellipse instead of a 16 px circle.
+    local knob = wibox.container.background()
+    knob.shape = gears.shape.circle
+    knob.bg = ui.color.text_strong
+    knob.forced_width = 16
+    knob.forced_height = 16
+    knob.widget = wibox.widget.textbox()
+
+    local knob_slot = wibox.container.place(knob)
+    knob_slot.halign = "center"
+    knob_slot.valign = "center"
+
     local slide = wibox.widget{
-        { knob, layout = wibox.layout.fixed.horizontal },
-        left = 2, right = 18, widget = wibox.container.margin,
+        knob_slot, left = 4, right = 22, widget = wibox.container.margin,
     }
-    local pill = wibox.widget{
-        slide, bg = ui.color.track, shape = gears.shape.rounded_bar,
-        forced_width = 42, forced_height = 22,
-        widget = wibox.container.background,
-    }
+    local pill = wibox.container.background()
+    pill.shape = gears.shape.rounded_bar
+    pill.bg = ui.color.track
+    pill.forced_width = 42
+    pill.forced_height = 24
+    pill.widget = wibox.container.place(slide)
 
     local function set_knob(on)
         anim.tween{ tag = "cc_switch_" .. id, duration = 0.16,
             step = function(t)
-                slide.left  = on and 2 + 20 * t or 22 - 20 * t
-                slide.right = on and 22 - 20 * t or 2 + 20 * t
+                slide.left  = on and 4 + 18 * t or 22 - 18 * t
+                slide.right = on and 22 - 18 * t or 4 + 18 * t
             end }
     end
 
@@ -117,39 +123,59 @@ local function make_switch(id, on_toggle)
     return pill
 end
 
+-- Row geometry: every row is [glyph][label][spacer][control] inside one
+-- fixed.horizontal, with the spacer computed from the popover's own width.
+-- align.horizontal shrinks its outer widgets to whatever is left, which
+-- squeezed switches into vertical slivers and clipped the value columns.
+local CONTENT_W = 316 - 2 * ui.surface_pad_h        -- card width
+local ROW_W     = CONTENT_W - 2 * ui.space.s        -- row content width
+
+local function line(lead, lead_w, trail, trail_w)
+    local box = wibox.widget{ layout = wibox.layout.fixed.horizontal }
+    lead.forced_width = lead_w
+    box:add(lead)
+    box:add(ui.spacer(math.max(0, ROW_W - lead_w - (trail_w or 0)), 1))
+    if trail then
+        if trail_w then trail.forced_width = trail_w end
+        box:add(trail)
+    end
+    return box
+end
+
 --- A full-width switch row: glyph, label (+ optional sub line), switch.
 local function switch_row(icon_glyph, label, sub, id, on_toggle)
-    local icon = ui.icon(icon_glyph, 11, ui.color.text_dim)
-    local main = ui.text{ font = ui.font.body, width = 190, ellipsize = "end" }
-    local subline = ui.text{ font = ui.font.tiny, width = 190, ellipsize = "end" }
+    local icon = ui.icon(icon_glyph, ui.glyph.m, ui.color.text_dim)
+    local main = ui.text{ font = ui.font.body, width = 166, ellipsize = "end" }
+    local subline = ui.text{ font = ui.font.tiny, width = 166, ellipsize = "end" }
 
     local switch = make_switch(id, on_toggle)
+    local switch_slot = wibox.container.place(switch)
+    switch_slot.halign = "left"
+    switch_slot.valign = "center"
 
     local texts = wibox.layout.fixed.vertical()
     texts.spacing = 0
     texts:add(main)
     texts:add(subline)
 
+    local lead = wibox.widget{
+        { icon, left = 2, right = 12, widget = wibox.container.margin },
+        texts,
+        layout = wibox.layout.fixed.horizontal,
+    }
+
     local row = wibox.container.background()
     row.shape = ui.radius_shape.card
     row.bg = ui.color.transparent
-    row.forced_height = sub and 40 or 34
-    row.widget = ui.pad(wibox.widget{
-        wibox.widget{
-            { icon, left = 2, right = 12, widget = wibox.container.margin },
-            texts,
-            layout = wibox.layout.fixed.horizontal,
-        },
-        nil,
-        { switch, left = 10, widget = wibox.container.margin },
-        layout = wibox.layout.align.horizontal,
-    }, 6, 6, 5, 5)
+    row.forced_height = sub and 40 or 32
+    row.widget = ui.pad(line(lead, 194, switch_slot, 42),
+        ui.space.s, ui.space.s, ui.space.xs, ui.space.xs)
 
     ui.hover(row, function() return ui.color.transparent end, ui.color.hover)
 
     function row:set(main_text, sub_text, on)
         ui.set_text(main, main_text, on and ui.color.text or ui.color.text_dim)
-        ui.set_text(subline, sub_text or "", sub_text and ui.color.text_faint or ui.color.text_faint)
+        ui.set_text(subline, sub_text or "", ui.color.text_faint)
         switch:set_checked(on)
     end
 
@@ -159,24 +185,22 @@ end
 
 --- Icon + label + trailing widget (slider rows, device rows).
 local function row(icon_glyph, label, trailing, height, on_hover)
-    local icon = ui.icon(icon_glyph, 11, ui.color.text_dim)
+    local icon = ui.icon(icon_glyph, ui.glyph.m, ui.color.text_dim)
     local main = ui.text{ font = ui.font.body, ellipsize = "end" }
     ui.set_text(main, label, ui.color.text_dim)
+
+    local lead = wibox.widget{
+        { icon, left = 2, right = 12, widget = wibox.container.margin },
+        main,
+        layout = wibox.layout.fixed.horizontal,
+    }
 
     local r = wibox.container.background()
     r.shape = ui.radius_shape.chip
     r.bg = ui.color.transparent
-    r.forced_height = height or 30
-    r.widget = ui.pad(wibox.widget{
-        wibox.widget{
-            { icon, left = 2, right = 12, widget = wibox.container.margin },
-            main,
-            layout = wibox.layout.fixed.horizontal,
-        },
-        nil,
-        trailing,
-        layout = wibox.layout.align.horizontal,
-    }, 6, 6, 3, 3)
+    r.forced_height = height or 32
+    r.widget = ui.pad(line(lead, 96, trailing, trailing and 160 or 0),
+        ui.space.s, ui.space.s, ui.space.xs, ui.space.xs)
     if on_hover then
         ui.hover(r, function() return ui.color.transparent end, ui.color.hover)
     end
@@ -190,13 +214,13 @@ local function slider(min, max)
     -- (the stock 4.3 slider has no value fill and an invisible track).
     return ui.slider{
         minimum = min, maximum = max,
-        width = 150, height = 20, bar_height = 4,
+        width = 112, height = 20, bar_height = 4,
     }
 end
 
 -------------------------------------------------------------------------- rows
 
-local wifi_row, bt_row, dark_row
+local wifi_row, bt_row
 local bright_slider, bright_pct
 local vol_slider, vol_pct, vol_icon
 local device_list
@@ -333,10 +357,6 @@ function refresh()
             end
         end
 
-        -- Dark mode (GNOME colour scheme)
-        state.dark = d.K == "'prefer-dark'"
-        if dark_row then dark_row:set("Dark mode", "system colour scheme", state.dark) end
-
         -- Brightness
         local pct = tonumber(d.L and d.L:match("(%d+)%%") or nil)
         if pct then
@@ -355,7 +375,7 @@ function refresh()
             state.muted = d.V:find("MUTED", 1, true) ~= nil
             ui.set_text(vol_pct, (state.muted and "muted" or state.volume .. "%"),
                 state.muted and ui.color.text_faint or ui.color.text, ui.font.body)
-            ui.set_icon(vol_icon, state.muted and FA_VOL_MUTE or FA_VOL, 11,
+            ui.set_icon(vol_icon, state.muted and FA_VOL_MUTE or FA_VOL, ui.glyph.m,
                 state.muted and ui.color.text_faint or ui.color.text_dim)
             if not dragging then
                 syncing = true
@@ -382,12 +402,6 @@ local function build_content()
     device_list = wibox.layout.fixed.vertical()
     device_list.spacing = 0
 
-    dark_row = switch_row(FA_MOON, "Dark mode", "system colour scheme", "dark", function(on)
-        awful.spawn.with_shell("gsettings set org.gnome.desktop.interface color-scheme " ..
-            (on and "prefer-dark" or "default"))
-        resync_soon(0.6)
-    end)
-
     bright_pct = ui.text{ font = ui.font.body, width = 40, align = "right" }
     bright_slider = slider(5, 100)
     bright_slider:connect_signal("button::press", function() dragging = true end)
@@ -404,7 +418,7 @@ local function build_content()
 
     vol_pct = ui.text{ font = ui.font.body, width = 40, align = "right" }
     vol_slider = slider(0, 100)
-    vol_icon = ui.icon(FA_VOL, 11, ui.color.text_dim)
+    vol_icon = ui.icon(FA_VOL, ui.glyph.m, ui.color.text_dim)
     vol_icon:buttons(gears.table.join(awful.button({}, 1, function()
         awful.spawn.with_shell("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle")
         resync_soon(0.5)
@@ -421,14 +435,16 @@ local function build_content()
         queue("vol", vol_slider:get_value())
     end)
 
-    local bright_row = row(FA_SUN, "Brightness", wibox.widget{
-        bright_slider, { bright_pct, left = 8, widget = wibox.container.margin },
+    local bright_group = wibox.widget{
+        bright_slider, { bright_pct, left = ui.space.s, widget = wibox.container.margin },
         layout = wibox.layout.fixed.horizontal,
-    })
-    local vol_row = row(FA_VOL, "Volume", wibox.widget{
-        vol_slider, { vol_pct, left = 8, widget = wibox.container.margin },
+    }
+    local bright_row = row(FA_SUN, "Brightness", bright_group)
+    local vol_group = wibox.widget{
+        vol_slider, { vol_pct, left = ui.space.s, widget = wibox.container.margin },
         layout = wibox.layout.fixed.horizontal,
-    })
+    }
+    local vol_row = row(FA_VOL, "Volume", vol_group)
 
     local open_panel = row(FA_PANEL, "Open AETHER panel", nil, 26, true)
     open_panel:buttons(gears.table.join(awful.button({}, 1, function()
@@ -451,16 +467,25 @@ local function build_content()
     end
 
     local content = wibox.layout.fixed.vertical()
-    content.spacing = 10
+    content.spacing = ui.space.xs
     content:add(ui.section("Connectivity"))
     content:add(card{ wifi_row, ui.divider(), bt_row, device_list })
-    content:add(ui.section("Display & sound", { spacing_before = 2 }))
-    content:add(card{ dark_row, ui.divider(), bright_row, vol_row })
+    content:add(ui.section("Display & sound", { spacing_before = ui.space.m }))
+    content:add(card{ bright_row, ui.divider(), vol_row })
     content:add(ui.divider())
     content:add(open_panel)
 
-    local surface = ui.surface(content, 316)
-    return surface
+    -- S1: the first probe takes ~200 ms; until it returns the rows say they
+    -- are being read instead of showing a blank sub-line and a switch that
+    -- looks switched off.
+    wifi_row:set("Wi-Fi", "checking…", false)
+    bt_row:set("Bluetooth", "checking…", false)
+
+    -- No ui.surface here: popover.apply already pads every spec.content by
+    -- surface_pad_h/v, and wrapping twice cost 32 px per side — the row content
+    -- box was 252 px wide while the rows were laid out for 268 (the switch was
+    -- squeezed to a sliver and the value columns were clipped).
+    return content
 end
 
 -------------------------------------------------------------------------- popup
@@ -485,6 +510,7 @@ local function open_cc()
         content = cc_popup,
         width = 316,
         modal = true,
+        reopen = open_cc,
         on_open = function()
             cc_open = true
             if not refresh_timer then
@@ -513,16 +539,18 @@ end
 --------------------------------------------------------------------------
 
 function M.new_button()
-    local glyph = ui.icon(FA_SLIDERS, 10, ui.color.text_dim)
+    -- 16 px: the control glyph reads at the icon size of the scale.  At 10 px
+    -- the sliders glyph is three specks and does not say "controls" (Q4).
+    local glyph = ui.icon(FA_SLIDERS, ui.glyph.l, ui.color.text_dim)
     local root = wibox.container.background()
     root.shape = ui.radius_shape.card
     root.bg = ui.color.transparent
-    root.forced_width = 30
+    root.forced_width = 28
     root.forced_height = 24
-    root.widget = wibox.container.place(ui.pad(glyph, 10, 10, 0, 0))
+    root.widget = wibox.container.place(ui.pad(glyph, ui.space.xs, ui.space.xs, 0, 0))
     ui.hover(root, function() return ui.color.transparent end, ui.color.hover,
-        function() ui.set_icon(glyph, FA_SLIDERS, 10, ui.color.text) end,
-        function() ui.set_icon(glyph, FA_SLIDERS, 10, ui.color.text_dim) end)
+        function() ui.set_icon(glyph, FA_SLIDERS, ui.glyph.l, ui.color.text) end,
+        function() ui.set_icon(glyph, FA_SLIDERS, ui.glyph.l, ui.color.text_dim) end)
     root:buttons(gears.table.join(awful.button({}, 1, function() M.toggle() end)))
     return root
 end

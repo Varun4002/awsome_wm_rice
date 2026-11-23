@@ -14,6 +14,30 @@ local M = {}
 
 local active = {}
 
+-- Reduced motion (design-qa S4): respect the desktop's animation preference.
+-- Read once at load and refreshed every 60 s, so toggling the setting takes
+-- effect without reloading the WM.  When animations are off, a tween jumps
+-- straight to its final frame instead of stepping.
+M.animations = true
+
+local function read_pref(out)
+    M.animations = (out or ""):find("false", 1, true) == nil
+end
+
+gears.timer {
+    timeout   = 60,
+    autostart = true,
+    call_now  = true,
+    callback  = function()
+        gears.timer.start_new(0, function()
+            require("awful").spawn.easy_async_with_shell(
+                "gsettings get org.gnome.desktop.interface enable-animations 2>/dev/null || true",
+                read_pref)
+            return false
+        end)
+    end,
+}
+
 M.ease = {
     linear    = function(t) return t end,
     out_cubic = function(t) return 1 - (1 - t) * (1 - t) * (1 - t) end,
@@ -33,6 +57,14 @@ function M.tween(args)
     local i     = 0
 
     if active[tag] then active[tag]:stop() end
+
+    -- Reduced motion: land on the final frame immediately (S4).
+    if not M.animations then
+        if args.step then pcall(args.step, ease(1)) end
+        if args.done then pcall(args.done) end
+        return nil
+    end
+
     -- Declare first so the callback's upvalue refers to this local, not to
     -- the global gears.timer function.
     local timer

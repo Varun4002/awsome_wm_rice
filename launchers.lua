@@ -23,10 +23,29 @@
 
 local awful = require("awful")
 local gears = require("gears")
+local naughty = require("naughty")
 
 local M = {}
 
 local CLASSES = { starlight = true, launchpad = true }
+
+-- Availability is probed once per class on first use: a binding whose binary is
+-- gone must say so instead of doing nothing (user-flow FL1).  `nil` = unknown,
+-- true = present, false = missing.
+local available = {}
+local warned_at = {}
+local WARN_INTERVAL = 30 -- seconds between notices for the same class
+
+local function warn_missing(class)
+    local now = os.time()
+    if warned_at[class] and now - warned_at[class] < WARN_INTERVAL then return end
+    warned_at[class] = now
+    naughty.notify {
+        title = "AETHER",
+        text  = "`" .. class .. "` is not installed.\nRebuild it or rebind its key.",
+        timeout = 8,
+    }
+end
 
 -- A remembered screen stays valid this long after the keybinding. It is
 -- consumed by the next manage of that class, so the TTL only matters for a
@@ -42,7 +61,58 @@ local target = {}
 --- Spawn a launcher on the screen the pointer is on right now.
 function M.spawn(class)
     target[class] = { screen = mouse.screen, at = os.time() }
+
+    local known = available[class]
+    if known == nil then
+        -- First press: resolve the binary, then spawn (or explain) in the
+        -- callback.  One shell round-trip, off the WM's critical path.
+        awful.spawn.easy_async_with_shell(
+            "command -v " .. class .. " >/dev/null 2>&1 && echo yes || echo no",
+            function(out)
+                local present = out:find("yes", 1, true) ~= nil
+                available[class] = present
+                if present then
+                    awful.spawn(class)
+                else
+                    target[class] = nil
+                    warn_missing(class)
+                end
+            end)
+        return
+    end
+
+    if not known then
+        target[class] = nil
+        warn_missing(class)
+        return
+    end
+
     awful.spawn(class)
+end
+
+--- Searchable launcher (navigation §3.6 / flow FL6).  `mode` is a rofi mode:
+-- "drun" for applications, "window" for every open window on every screen.
+-- rofi is the interim affordance while the AETHER launchers are missing, so
+-- it is probed exactly like them and reports its absence instead of failing
+-- silently.
+function M.search(mode)
+    local binary = "rofi"
+    local known = available[binary]
+    local function run()
+        awful.spawn.with_shell("rofi -show " .. mode)
+    end
+    if known == nil then
+        awful.spawn.easy_async_with_shell(
+            "command -v " .. binary .. " >/dev/null 2>&1 && echo yes || echo no",
+            function(out)
+                local present = out:find("yes", 1, true) ~= nil
+                available[binary] = present
+                if present then run() else warn_missing(binary) end
+            end)
+        return
+    end
+    if not known then warn_missing(binary) return end
+    run()
 end
 
 --- Screen index for the window rule; falls back to the pointer's screen.

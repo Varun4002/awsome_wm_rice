@@ -247,7 +247,7 @@ local function traffic_dot(c, normal, hover, action)
     dot.shape = gears.shape.circle
     dot.bg = normal
     dot.forced_width = 13
-    dot.forced_height = 13
+    dot.forced_height = 12
     -- container.background paints its background only when it has a child.
     dot.widget = wibox.widget.textbox()
 
