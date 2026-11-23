@@ -239,10 +239,14 @@ function M.show(spec)
         if old.spec.on_close then pcall(old.spec.on_close, "replace") end
     end
     if current and current.id == spec.id then
-        -- same surface, new data (sliding across workspaces, live rerender)
+        -- same surface, new data (sliding across workspaces, live rerender).
+        -- Swap the content in place: no re-anchor (the surface must not jump
+        -- under the pointer mid-read) and no re-fade (a 0.14 s blink on every
+        -- state change read as a glitch).  Call sites that only need a data
+        -- poke without a rebuild use spec.refresh instead (media card).
         if current.spec.on_close then pcall(current.spec.on_close, "update") end
         current = { id = spec.id, spec = spec, modal = spec.modal == true }
-        apply(spec, s, anchor)
+        popup.widget = ui.surface(spec.content, spec.width)
         notify()
         return
     end
@@ -261,7 +265,6 @@ end
 
 function M.close(reason)
     if not current then return end
-    print("AETHERDEBUG close id=" .. tostring(current.id) .. " reason=" .. tostring(reason))
     local old = current
     current = nil
     if old.spec.on_close then pcall(old.spec.on_close, reason or "close") end

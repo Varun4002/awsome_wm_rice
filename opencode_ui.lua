@@ -71,7 +71,7 @@ end
 local function session_row(s, opts)
     opts = opts or {}
     local dot = ui.dot(s.working and ui.color.accent
-        or (s.outcome == "failed" and ui.color.danger or "#ffffff26"), 5)
+        or (s.outcome == "failed" and ui.color.danger or ui.color.idle_dot), 5)
     local title = ui.text{ font = ui.font.small, ellipsize = "end",
                            width = opts.title_width or 210 }
     ui.set_text(title, s.title, s.working and ui.color.text or ui.color.text_dim)
@@ -81,8 +81,8 @@ local function session_row(s, opts)
         ui.color.text_faint)
 
     local row = wibox.container.background()
-    row.shape = gears.shape.rounded_rect
-    row.bg = "#00000000"
+    row.shape = ui.radius_shape.card
+    row.bg = ui.color.transparent
     row.forced_height = 24
     row.widget = ui.pad(wibox.widget{
         wibox.widget{
@@ -94,7 +94,7 @@ local function session_row(s, opts)
         meta,
         layout = wibox.layout.align.horizontal,
     }, 4, 4, 0, 0)
-    ui.hover(row, function() return "#00000000" end, ui.color.hover)
+    ui.hover(row, function() return ui.color.transparent end, ui.color.hover)
     if opts.on_pick then
         row:buttons(gears.table.join(awful.button({}, 1, function()
             opts.on_pick(s)
@@ -204,14 +204,14 @@ local function usage_row(w, bar_width)
         or (w.pct >= 80 and ui.color.warn or ui.color.accent)
     local name = ui.text{ font = ui.font.small, ellipsize = "end", width = 62 }
     ui.set_text(name, w.name, ui.color.text_dim, ui.font.small)
-    local bar = wibox.widget.progressbar{
-        max_value        = 100,
-        value            = w.pct,
-        color            = color,
-        background_color = ui.color.track,
-        shape            = gears.shape.rounded_rect,
-        bar_shape        = gears.shape.rounded_rect,
-    }
+    local bar = wibox.widget.progressbar()
+    -- 4.3 progressbar drops constructor args: assign as properties.
+    bar.max_value        = 100
+    bar.value            = w.pct
+    bar.color            = color
+    bar.background_color = ui.color.track
+    bar.shape            = gears.shape.rounded_rect
+    bar.bar_shape        = gears.shape.rounded_rect
     bar.forced_width  = bar_width
     bar.forced_height = 5
     local pct = ui.text{ font = ui.font.body, align = "right", width = 40 }
@@ -324,8 +324,8 @@ local function open_surface(opts)
     local head = wibox.widget{
         wibox.widget{
             { ui.dot(s.color, 8), right = 9, widget = wibox.container.margin },
-            ui.text{ font = "Inter SemiBold 11",
-                     markup = ui.span("OpenCode", ui.color.text, "Inter SemiBold 11") },
+            ui.text{ font = ui.font.clock,
+                     markup = ui.span("OpenCode", ui.color.text, ui.font.clock) },
             layout = wibox.layout.fixed.horizontal,
         },
         nil,
@@ -424,7 +424,11 @@ local function paint_entry(e)
 
     local text = "opencode"
     local color = st.reachable and ui.color.text_dim or ui.color.text_faint
+    local glyph -- optional FA glyph before the label (U6)
     if st.status == "waiting" and st.pending.total > 0 then
+        -- Glyph prefix so "· 1" reads as "something needs you", not as a
+        -- session counter (U6).
+        glyph = "\u{f12a}" -- fa-exclamation, same family the bar already uses
         text = string.format("opencode · %d", st.pending.total)
         color = ui.color.warn
     elseif st.status == "working" and project then
@@ -437,7 +441,14 @@ local function paint_entry(e)
         text = "opencode · " .. project
         color = ui.color.text_dim
     end
-    ui.set_text(e.label, text, color, ui.font.small)
+    if glyph then
+        ui.set_markup(e.label, string.format(
+            '<span font="FontAwesome 9" foreground="%s">%s</span>'
+                .. '<span font="%s" foreground="%s"> %s</span>',
+            color, ui.esc(glyph), ui.font.small, color, ui.esc(text)))
+    else
+        ui.set_text(e.label, text, color, ui.font.small)
+    end
 end
 
 local function register(e)
@@ -455,8 +466,8 @@ function M.bar_widget(s)
     local label = ui.text{ font = ui.font.small }
 
     local root = wibox.container.background()
-    root.shape = gears.shape.rounded_rect
-    root.bg = "#00000000"
+    root.shape = ui.radius_shape.card
+    root.bg = ui.color.transparent
     root.forced_height = 26
     root.widget = wibox.container.place(wibox.widget{
         { dot, right = 7, widget = wibox.container.margin },
@@ -467,7 +478,7 @@ function M.bar_widget(s)
     local entry = { dot = dot, label = label, screen = s }
     register(entry)
 
-    ui.hover(root, function() return "#00000000" end, ui.color.hover)
+    ui.hover(root, function() return ui.color.transparent end, ui.color.hover)
 
     root:buttons(gears.table.join(awful.button({}, 1, function()
         if popover.is_open("opencode") then

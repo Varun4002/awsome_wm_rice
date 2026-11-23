@@ -19,9 +19,8 @@
 -- picom config, apply it without touching the WM:
 --     awesome-client 'require("glass").restart_compositor()'
 --
--- To re-enable titlebars (they are disabled in rc.lua's rules), set the
--- rules' titlebars_enabled back to true: the theme keys for them are set
--- below as well.
+-- Titlebars are enabled for normal/dialog clients by rc.lua's rules; the
+-- theme keys for them are set below as well.
 --------------------------------------------------------------------------
 
 local awful     = require("awful")
@@ -31,6 +30,7 @@ local wibox     = require("wibox")
 local gstring   = require("gears.string")
 local gsurface = require("gears.surface")
 local naughty   = require("naughty")
+local ui        = require("ui")
 
 local M = {}
 
@@ -38,8 +38,8 @@ M.config = {
     -- Window opacity.  Text stays readable because the terminal itself keeps
     -- a nearly opaque background (kitty: background_opacity in kitty.conf);
     -- these values fade the whole window on top of that.
-    focused_opacity            = 0.94,
-    unfocused_opacity          = 0.88,
+    focused_opacity            = 0.96,
+    unfocused_opacity          = 0.86,
     floating_focused_opacity   = 0.92,
     floating_unfocused_opacity = 0.86,
     maximized_opacity          = 0.97,
@@ -69,11 +69,11 @@ M.config = {
     titlebar_height    = 28,
     titlebar_bg_normal = "#0a0c10b8",
     titlebar_bg_focus  = "#0d1117cc",
-    titlebar_font      = "Inter SemiBold 10",
-    titlebar_meta_font = "Inter Medium 9",
-    titlebar_fg_normal = "#9aa0aa",
-    titlebar_fg_focus  = "#f2f4f8",
-    titlebar_meta_fg   = "#7f8792",
+    titlebar_font      = ui.font.strong,
+    titlebar_meta_font = ui.font.small,
+    titlebar_fg_normal = ui.color.text_dim,
+    titlebar_fg_focus  = ui.color.text,
+    titlebar_meta_fg   = ui.color.text_faint,
     corner_radius      = 12,
 }
 
@@ -90,35 +90,42 @@ local function apply_theme()
     beautiful.border_normal = cfg.border_normal
     beautiful.border_marked = "#c9a227"
 
+    -- The stock theme's "sans 8" leaked through any widget that does not set
+    -- its own font (the keyboard-layout indicator was the only non-Inter text
+    -- in the bar).  Inter everywhere, from the token table.
+    beautiful.font = ui.font.body
+
     -- Non-client surfaces.  bg_normal/bg_focus are the fallbacks menus,
     -- tooltips and titlebars read; the explicit keys override them per
     -- widget class.  Alpha here is in the wibox/drawin path (cairo), which
-    -- does honour it.
-    beautiful.bg_normal = "#0e1014e6"
+    -- does honour it.  Chrome backgrounds are glass-specific; foregrounds
+    -- come from the ui token palette so bar, popover and chrome text agree.
+    local chrome_bg = "#0e1014e6"
+    beautiful.bg_normal = chrome_bg
     beautiful.bg_focus  = "#1a2029f2"
     beautiful.bg_urgent = "#8c2f2f"
     beautiful.bg_minimize = "#2a2f38"
-    beautiful.fg_normal = "#c9ccd4"
-    beautiful.fg_focus  = "#f5f7fa"
-    beautiful.fg_urgent = "#ffffff"
-    beautiful.fg_minimize = "#f5f7fa"
+    beautiful.fg_normal = ui.color.text_dim
+    beautiful.fg_focus  = ui.color.text
+    beautiful.fg_urgent = ui.color.text_strong
+    beautiful.fg_minimize = ui.color.text
 
-    beautiful.menu_bg_normal = "#0e1014e6"
+    beautiful.menu_bg_normal = chrome_bg
     beautiful.menu_bg_focus  = "#26303deb"
-    beautiful.menu_fg_normal = "#c9ccd4"
-    beautiful.menu_fg_focus  = "#ffffff"
-    beautiful.menu_border_color = "#ffffff1f"
+    beautiful.menu_fg_normal = ui.color.text_dim
+    beautiful.menu_fg_focus  = ui.color.text_strong
+    beautiful.menu_border_color = ui.color.border
     beautiful.menu_border_width = 1
-    beautiful.menu_font = "Inter Medium 10"
+    beautiful.menu_font = ui.font.body
 
-    beautiful.notification_bg = "#0e1014e6"
-    beautiful.notification_fg = "#e6e8ee"
-    beautiful.notification_border_color = "#ffffff1f"
+    beautiful.notification_bg = chrome_bg
+    beautiful.notification_fg = ui.color.text
+    beautiful.notification_border_color = ui.color.border
     beautiful.notification_border_width = 1
     beautiful.notification_shape = function(cr, w, h)
-        gears.shape.rounded_rect(cr, w, h, 12)
+        gears.shape.rounded_rect(cr, w, h, ui.radius.popup)
     end
-    beautiful.notification_font = "Inter Medium 10"
+    beautiful.notification_font = ui.font.body
 
     -- awesome 4.3 resolves notification icon *names* against
     -- naughty.config.icon_dirs, which defaults to {"/usr/share/pixmaps/"} with
@@ -133,15 +140,9 @@ local function apply_theme()
     naughty.config.icon_formats = { "png", "svg", "gif" }
     beautiful.notification_icon_size = 48
 
-    beautiful.tooltip_bg_color = "#0e1014e6"
-    beautiful.tooltip_fg_color = "#e6e8ee"
-    beautiful.tooltip_font = "Inter Medium 9"
-
-    -- Only used if titlebars are re-enabled in rc.lua.
-    beautiful.titlebar_bg_normal = "#0e1014d9"
-    beautiful.titlebar_bg_focus  = "#161c25e6"
-    beautiful.titlebar_fg_normal = "#9aa0aa"
-    beautiful.titlebar_fg_focus  = "#f5f7fa"
+    beautiful.tooltip_bg_color = chrome_bg
+    beautiful.tooltip_fg_color = ui.color.text
+    beautiful.tooltip_font = ui.font.small
 end
 
 -------------------------------------------------------------------------- opacity

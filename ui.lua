@@ -23,7 +23,7 @@ M.bar_height = 38
 M.color = {
     text         = "#e9edf3",
     text_dim     = "#98a0ad",
-    text_faint   = "#6c7480",
+    text_faint   = "#7c8490", -- 5.1:1 on graphite; #6c7480 failed WCAG AA
     text_strong  = "#ffffff",
     accent       = "#7cc4ee",
     accent_hi    = "#aadfff",
@@ -31,6 +31,7 @@ M.color = {
     accent_bg_hi = "#7cc4ee40",
     danger       = "#f07878",
     danger_bg    = "#f0787826",
+    danger_hover = "#f0787838",
     warn         = "#e6b465",
     ok           = "#79d6a4",
     bg_popup     = "#0d0f13ef",
@@ -39,20 +40,39 @@ M.color = {
     hover        = "#ffffff0f",
     active       = "#ffffff1a",
     track        = "#ffffff2b", -- ~17% white: dark-surface tracks must read
+    -- Roles that only had literal spellings before: occupied row/pill bg,
+    -- idle status dot, card surface, the panel window dot.
+    occupied     = "#ffffff0d",
+    idle_dot     = "#ffffff26",
+    card_bg      = "#ffffff08",
+    transparent  = "#00000000",
 }
 
 M.font = {
-    tiny   = "Inter Medium 8",
-    small  = "Inter Medium 9",
-    body   = "Inter Medium 10",
-    strong = "Inter SemiBold 10",
-    mark   = "Inter SemiBold 9",
-    title  = "Inter SemiBold 12",
-    clock  = "Inter SemiBold 11",
+    tiny    = "Inter Medium 8",
+    small   = "Inter Medium 9",
+    body    = "Inter Medium 10",
+    strong  = "Inter SemiBold 10",
+    mark    = "Inter SemiBold 9",
+    title   = "Inter SemiBold 12",
+    clock   = "Inter SemiBold 11",
+    display = "Inter SemiBold 20", -- clock detail surface / hero numerals
 }
 
 M.radius = { popup = 12, card = 10, chip = 7, pill = 7 }
+
+-- Drop-in shape functions bound to the radius tokens: `widget.shape =
+-- ui.radius_shape.chip` instead of a bare rounded_rect, which silently
+-- falls back to gears' default radius 10 and made M.radius dead.
+M.radius_shape = {}
+for rname, rval in pairs(M.radius) do
+    M.radius_shape[rname] = function(cr, w, h)
+        gears.shape.rounded_rect(cr, w, h, rval)
+    end
+end
+
 M.gap    = 6
+M.block_h = 28 -- height of a bar block (clock, window, ...) inside the 38 px bar
 
 local FA = "FontAwesome "
 
@@ -152,7 +172,7 @@ function M.spacer(w, h)
     local s = wibox.widget.separator{ orientation = "vertical" }
     s.forced_width = w or 1
     s.forced_height = h or 1
-    s.color = "#00000000"
+    s.color = M.color.transparent
     return s
 end
 
@@ -226,7 +246,7 @@ function M.chip(args)
     local body = M.hbox({ glyph_slot, label }, 0)
 
     local root = wibox.container.background()
-    root.shape = gears.shape.rounded_rect
+    root.shape = M.radius_shape.chip
     local place = wibox.container.place(M.pad(body, args.pad_l or 9, args.pad_r or 9, 0, 0))
     place.halign = args.align or "center"
     place.valign = "center"
@@ -235,14 +255,14 @@ function M.chip(args)
     if args.width then root.forced_width = args.width end
 
     local function base_bg()
-        if not state.enabled then return "#00000000" end
+        if not state.enabled then return M.color.transparent end
         if state.danger and state.active then return M.color.danger_bg end
         if state.active then return M.color.accent_bg end
-        return args.flat and "#00000000" or M.color.hover
+        return args.flat and M.color.transparent or M.color.hover
     end
     local function hover_bg()
-        if not state.enabled then return "#00000000" end
-        if state.danger then return "#f0787838" end
+        if not state.enabled then return M.color.transparent end
+        if state.danger then return M.color.danger_hover end
         if state.active then return M.color.accent_bg_hi end
         return M.color.hover
     end
@@ -342,7 +362,7 @@ end
 function M.icon_slot(size)
     size = size or 16
     local chip = wibox.container.background()
-    chip.shape = gears.shape.rounded_rect
+    chip.shape = M.radius_shape.chip
     chip.bg = M.color.accent_bg
     chip.forced_width = size
     chip.forced_height = size
@@ -428,6 +448,101 @@ function M.divider()
     }
 end
 
+-------------------------------------------------------------------------- layout glyph
+
+--- Token-coloured layout indicator (replaces the stock layoutbox PNGs,
+--- whose white window art dominated the bar: .skills_upgrades U1).
+-- Paints a 16x12 diagram: container cells stroked in text_dim, the master
+-- region in accent, max.fullscreen filled with accent_bg.
+function M.layout_indicator(scr)
+    local base = require("wibox.widget.base")
+    local w = base.make_widget(nil, "aether_layout_indicator")
+
+    function w:fit(_, width, height)
+        return math.min(16, width), math.min(12, height)
+    end
+
+    function w:draw(_, cr, width, height)
+        local name = awful.layout.getname(awful.layout.get(scr)) or ""
+        local m = 1.5
+        local x0, y0 = m, m
+        local iw, ih = width - 2 * m, height - 2 * m
+        local cell = gears.color(M.color.text_dim)
+        local accent = gears.color(M.color.accent)
+        local accent_bg = gears.color(M.color.accent_bg)
+        cr:set_line_width(1)
+
+        local function stroke(x, y, ww, hh)
+            cr:rectangle(x, y, ww, hh)
+            cr:stroke()
+        end
+        local function fill_accent(x, y, ww, hh)
+            cr:set_source(accent_bg)
+            cr:rectangle(x, y, ww, hh)
+            cr:fill()
+            cr:set_source(accent)
+            cr:rectangle(x, y, ww, hh)
+            cr:stroke()
+        end
+
+        cr:set_source(cell)
+        if name == "floating" then
+            stroke(x0, y0 + ih * 0.35, iw * 0.5, ih * 0.55)
+            stroke(x0 + iw * 0.42, y0, iw * 0.58, ih * 0.6)
+        elseif name == "tile" then
+            fill_accent(x0, y0, iw / 3, ih)
+            stroke(x0 + iw / 3, y0, iw * 2 / 3, ih / 2 - 0.5)
+            stroke(x0 + iw / 3, y0 + ih / 2 + 0.5, iw * 2 / 3, ih / 2 - 0.5)
+        elseif name == "tile.left" then
+            fill_accent(x0 + iw * 2 / 3, y0, iw / 3, ih)
+            stroke(x0, y0, iw * 2 / 3, ih / 2 - 0.5)
+            stroke(x0, y0 + ih / 2 + 0.5, iw * 2 / 3, ih / 2 - 0.5)
+        elseif name == "tile.bottom" then
+            fill_accent(x0, y0, iw, ih / 2)
+            stroke(x0, y0 + ih / 2 + 0.5, iw / 2 - 0.5, ih / 2 - 0.5)
+            stroke(x0 + iw / 2 + 0.5, y0 + ih / 2 + 0.5, iw / 2 - 0.5, ih / 2 - 0.5)
+        elseif name == "tile.top" then
+            fill_accent(x0, y0 + ih / 2, iw, ih / 2)
+            stroke(x0, y0, iw / 2 - 0.5, ih / 2 - 0.5)
+            stroke(x0 + iw / 2 + 0.5, y0, iw / 2 - 0.5, ih / 2 - 0.5)
+        elseif name == "fair" or name == "spiral" or name == "dwindle" then
+            fill_accent(x0, y0, iw / 2 - 0.5, ih)
+            stroke(x0 + iw / 2 + 0.5, y0, iw / 2 - 0.5, ih / 2 - 0.5)
+            stroke(x0 + iw / 2 + 0.5, y0 + ih / 2 + 0.5, iw / 2 - 0.5, ih / 2 - 0.5)
+        elseif name == "fair.horizontal" then
+            fill_accent(x0, y0, iw, ih / 2 - 0.5)
+            stroke(x0, y0 + ih / 2 + 0.5, iw / 2 - 0.5, ih / 2 - 0.5)
+            stroke(x0 + iw / 2 + 0.5, y0 + ih / 2 + 0.5, iw / 2 - 0.5, ih / 2 - 0.5)
+        elseif name == "max" then
+            fill_accent(x0, y0, iw, ih)
+        elseif name == "max.fullscreen" then
+            cr:set_source(accent_bg)
+            cr:rectangle(x0, y0, iw, ih)
+            cr:fill()
+            cr:set_source(accent)
+            cr:rectangle(x0, y0, iw, ih)
+            cr:stroke()
+        elseif name == "magnifier" then
+            fill_accent(x0 + iw * 0.25, y0, iw * 0.5, ih)
+            stroke(x0, y0 + ih * 0.3, iw * 0.2, ih * 0.4)
+            stroke(x0 + iw * 0.8, y0 + ih * 0.3, iw * 0.2, ih * 0.4)
+        elseif name == "corner.nw" then
+            fill_accent(x0, y0, iw * 0.6, ih * 0.6)
+            stroke(x0 + iw * 0.6 + 0.5, y0, iw * 0.4 - 0.5, ih * 0.4)
+            stroke(x0, y0 + ih * 0.6 + 0.5, iw * 0.4, ih * 0.4)
+        else
+            stroke(x0, y0, iw, ih)
+        end
+    end
+
+    -- Layout and selection changes arrive on tag objects; a 16x12 repaint
+    -- is cheap enough to do from every instance rather than track screens.
+    local function repaint() w:emit_signal("widget::redraw_needed") end
+    tag.connect_signal("property::layout", repaint)
+    tag.connect_signal("property::selected", repaint)
+    return w
+end
+
 -------------------------------------------------------------------------- sliders
 
 -- awesome 4.3's slider draws only a track and a handle — there is no value
@@ -438,17 +553,19 @@ end
 -- signals, so call sites read like a plain slider.
 function M.slider(args)
     args = args or {}
-    local inner = wibox.widget.slider{
-        minimum        = args.minimum or 0,
-        maximum        = args.maximum or 100,
-        value          = args.value or (args.minimum or 0),
-        bar_shape      = gears.shape.rounded_bar,
-        bar_height     = 0, -- the underlay paints track + fill
-        handle_shape   = gears.shape.circle,
-        handle_width   = 10,
-        handle_margins = { left = 0, right = 0, top = 5, bottom = 5 },
-        handle_color   = args.handle_color or M.color.text,
-    }
+    -- awesome 4.3's slider silently DROPS its constructor argument table
+    -- (verified in .skills_upgrades/bar-aesthetic): every property must be
+    -- assigned after construction or it renders as a bare slab.
+    local inner = wibox.widget.slider()
+    inner.minimum        = args.minimum or 0
+    inner.maximum        = args.maximum or 100
+    inner.value          = args.value or (args.minimum or 0)
+    inner.bar_shape      = gears.shape.rounded_bar
+    inner.bar_height     = 0 -- the underlay paints track + fill
+    inner.handle_shape   = gears.shape.circle
+    inner.handle_width   = 10
+    inner.handle_margins = { left = 0, right = 0, top = 5, bottom = 5 }
+    inner.handle_color   = args.handle_color or M.color.text
     local track_color = args.track or M.color.track
     local fill_color  = args.fill or M.color.accent
     local base = require("wibox.widget.base")
@@ -530,11 +647,10 @@ function M.calendar(year, month, cell_width)
     for day = 1, total do
         local tb = M.text{ font = M.font.small, align = "center" }
         if same_month and day == today then
-            set_markup(tb, M.span(tostring(day), M.color.accent_hi,
-                "Inter SemiBold 9"))
+            set_markup(tb, M.span(tostring(day), M.color.accent_hi, M.font.mark))
             row[#row + 1] = {
                 { tb, widget = wibox.container.place },
-                bg = M.color.accent_bg, shape = gears.shape.rounded_rect,
+                bg = M.color.accent_bg, shape = M.radius_shape.chip,
                 forced_width = cell_width, forced_height = 22,
                 widget = wibox.container.background,
             }

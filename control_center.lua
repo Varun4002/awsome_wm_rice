@@ -76,7 +76,7 @@ end
 local function make_switch(id, on_toggle)
     local checked = false
     local knob = wibox.widget{
-        bg = "#ffffff", shape = gears.shape.circle,
+        bg = ui.color.text_strong, shape = gears.shape.circle,
         forced_width = 18, forced_height = 18,
         widget = wibox.container.background,
     }
@@ -131,8 +131,8 @@ local function switch_row(icon_glyph, label, sub, id, on_toggle)
     texts:add(subline)
 
     local row = wibox.container.background()
-    row.shape = gears.shape.rounded_rect
-    row.bg = "#00000000"
+    row.shape = ui.radius_shape.card
+    row.bg = ui.color.transparent
     row.forced_height = sub and 40 or 34
     row.widget = ui.pad(wibox.widget{
         wibox.widget{
@@ -145,7 +145,7 @@ local function switch_row(icon_glyph, label, sub, id, on_toggle)
         layout = wibox.layout.align.horizontal,
     }, 6, 6, 5, 5)
 
-    ui.hover(row, function() return "#00000000" end, ui.color.hover)
+    ui.hover(row, function() return ui.color.transparent end, ui.color.hover)
 
     function row:set(main_text, sub_text, on)
         ui.set_text(main, main_text, on and ui.color.text or ui.color.text_dim)
@@ -164,8 +164,8 @@ local function row(icon_glyph, label, trailing, height, on_hover)
     ui.set_text(main, label, ui.color.text_dim)
 
     local r = wibox.container.background()
-    r.shape = gears.shape.rounded_rect
-    r.bg = "#00000000"
+    r.shape = ui.radius_shape.chip
+    r.bg = ui.color.transparent
     r.forced_height = height or 30
     r.widget = ui.pad(wibox.widget{
         wibox.widget{
@@ -178,7 +178,7 @@ local function row(icon_glyph, label, trailing, height, on_hover)
         layout = wibox.layout.align.horizontal,
     }, 6, 6, 3, 3)
     if on_hover then
-        ui.hover(r, function() return "#00000000" end, ui.color.hover)
+        ui.hover(r, function() return ui.color.transparent end, ui.color.hover)
     end
     r.label = main
     r.icon = icon
@@ -200,6 +200,7 @@ local wifi_row, bt_row, dark_row
 local bright_slider, bright_pct
 local vol_slider, vol_pct, vol_icon
 local device_list
+local last_device_sig -- device-list signature: rows only rebuild on change
 
 local dragging, syncing = false, false
 local pending_bright, pending_vol
@@ -273,50 +274,62 @@ function refresh()
                 state.bt_on)
         end
         if device_list then
-            device_list:reset()
+            -- Rebuild the device rows only when the list actually changed:
+            -- the 2.5 s refresh used to tear down and rebuild every row on
+            -- each tick, flickering the open popover for identical data.
             local devices = {}
             for _, dev in pairs(d.devices or {}) do devices[#devices + 1] = dev end
             table.sort(devices, function(a, b)
                 if a.connected ~= b.connected then return a.connected end
                 return a.name < b.name
             end)
-            local shown = 0
-            for _, dev in ipairs(devices) do
-                if shown >= 3 then break end
-                shown = shown + 1
-                local dot = ui.dot(dev.connected and ui.color.ok or "#ffffff26", 5)
-                local name = ui.text{ font = ui.font.small, ellipsize = "end", width = 158 }
-                ui.set_text(name, dev.name, dev.connected and ui.color.text or ui.color.text_dim)
-                local st = ui.text{ font = ui.font.tiny, align = "right", width = 66 }
-                ui.set_text(st, dev.connected and "connected" or "paired", ui.color.text_faint)
-                local r = wibox.container.background()
-                r.shape = gears.shape.rounded_rect
-                r.bg = "#00000000"
-                r.forced_height = 24
-                r.widget = ui.pad(wibox.widget{
-                    wibox.widget{
-                        { dot, left = 6, right = 8, widget = wibox.container.margin },
-                        name,
-                        layout = wibox.layout.fixed.horizontal,
-                    },
-                    nil,
-                    st,
-                    layout = wibox.layout.align.horizontal,
-                }, 2, 2, 0, 0)
-                ui.hover(r, function() return "#00000000" end, ui.color.hover)
-                r:buttons(gears.table.join(awful.button({}, 1, function()
-                    awful.spawn.with_shell("bluetoothctl " ..
-                        (dev.connected and "disconnect " or "connect ") .. dev.mac)
-                    resync_soon(1.5)
-                end)))
-                device_list:add(r)
+            local sig = {}
+            for i = 1, math.min(#devices, 3) do
+                sig[#sig + 1] = devices[i].mac .. (devices[i].connected and "+" or "-")
             end
-            if shown == 0 then
-                local empty = ui.text{ font = ui.font.tiny }
-                ui.set_text(empty, state.bt_available and state.bt_on
-                    and "No paired devices" or "Bluetooth is off",
-                    ui.color.text_faint, ui.font.tiny)
-                device_list:add(empty)
+            sig = table.concat(sig, ",") .. "|" .. tostring(state.bt_available)
+                .. tostring(state.bt_on)
+            if sig ~= last_device_sig then
+                last_device_sig = sig
+                device_list:reset()
+                local shown = 0
+                for _, dev in ipairs(devices) do
+                    if shown >= 3 then break end
+                    shown = shown + 1
+                    local dot = ui.dot(dev.connected and ui.color.ok or ui.color.idle_dot, 5)
+                    local name = ui.text{ font = ui.font.small, ellipsize = "end", width = 158 }
+                    ui.set_text(name, dev.name, dev.connected and ui.color.text or ui.color.text_dim)
+                    local st = ui.text{ font = ui.font.tiny, align = "right", width = 66 }
+                    ui.set_text(st, dev.connected and "connected" or "paired", ui.color.text_faint)
+                    local r = wibox.container.background()
+                    r.shape = ui.radius_shape.card
+                    r.bg = ui.color.transparent
+                    r.forced_height = 24
+                    r.widget = ui.pad(wibox.widget{
+                        wibox.widget{
+                            { dot, left = 6, right = 8, widget = wibox.container.margin },
+                            name,
+                            layout = wibox.layout.fixed.horizontal,
+                        },
+                        nil,
+                        st,
+                        layout = wibox.layout.align.horizontal,
+                    }, 2, 2, 0, 0)
+                    ui.hover(r, function() return ui.color.transparent end, ui.color.hover)
+                    r:buttons(gears.table.join(awful.button({}, 1, function()
+                        awful.spawn.with_shell("bluetoothctl " ..
+                            (dev.connected and "disconnect " or "connect ") .. dev.mac)
+                        resync_soon(1.5)
+                    end)))
+                    device_list:add(r)
+                end
+                if shown == 0 then
+                    local empty = ui.text{ font = ui.font.tiny }
+                    ui.set_text(empty, state.bt_available and state.bt_on
+                        and "No paired devices" or "Bluetooth is off",
+                        ui.color.text_faint, ui.font.tiny)
+                    device_list:add(empty)
+                end
             end
         end
 
@@ -428,8 +441,8 @@ local function build_content()
 
     local card = function(children)
         local box = wibox.container.background()
-        box.shape = gears.shape.rounded_rect
-        box.bg = "#ffffff08"
+        box.shape = ui.radius_shape.card
+        box.bg = ui.color.card_bg
         box.shape_border_width = 1
         box.shape_border_color = ui.color.border
         box.widget = wibox.layout.fixed.vertical()
@@ -502,12 +515,12 @@ end
 function M.new_button()
     local glyph = ui.icon(FA_SLIDERS, 10, ui.color.text_dim)
     local root = wibox.container.background()
-    root.shape = gears.shape.rounded_rect
-    root.bg = "#00000000"
+    root.shape = ui.radius_shape.card
+    root.bg = ui.color.transparent
     root.forced_width = 30
     root.forced_height = 24
     root.widget = wibox.container.place(ui.pad(glyph, 10, 10, 0, 0))
-    ui.hover(root, function() return "#00000000" end, ui.color.hover,
+    ui.hover(root, function() return ui.color.transparent end, ui.color.hover,
         function() ui.set_icon(glyph, FA_SLIDERS, 10, ui.color.text) end,
         function() ui.set_icon(glyph, FA_SLIDERS, 10, ui.color.text_dim) end)
     root:buttons(gears.table.join(awful.button({}, 1, function() M.toggle() end)))

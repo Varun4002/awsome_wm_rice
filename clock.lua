@@ -82,8 +82,8 @@ end
 
 local function build_detail()
     local now = os.date("*t")
-    local time = ui.text{ font = "Inter SemiBold 20", align = "center" }
-    ui.set_text(time, ui.time12(), ui.color.text, "Inter SemiBold 20")
+    local time = ui.text{ font = ui.font.display, align = "center" }
+    ui.set_text(time, ui.time12(), ui.color.text, ui.font.display)
 
     local date = ui.text{ font = ui.font.body, align = "center" }
     ui.set_text(date, (os.date("%A, %d %B %Y"):gsub(", 0", ", ")), ui.color.text_dim, ui.font.body)
@@ -119,12 +119,12 @@ function M.widget()
         spacing = 0,
     }
     local root = wibox.container.background()
-    root.shape = gears.shape.rounded_rect
-    root.bg = "#00000000"
-    root.forced_height = 28
+    root.shape = ui.radius_shape.chip
+    root.bg = ui.color.transparent
+    root.forced_height = ui.block_h
     root.widget = wibox.container.place(ui.pad(column, 6, 8, 0, 0))
 
-    ui.hover(root, function() return "#00000000" end, ui.color.hover)
+    ui.hover(root, function() return ui.color.transparent end, ui.color.hover)
 
     root:buttons(gears.table.join(awful.button({}, 1, function()
         if popover.is_open("clock-detail") and popover.any_modal() then

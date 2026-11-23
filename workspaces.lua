@@ -191,11 +191,11 @@ local function paint_pill(root, tag, label, tick)
         -- selected.  No label, no decoration competing with the wallpaper.
         local base = dotws.accent_color
         local fg = urgent and ui.color.warn
-            or (selected and base or dotws.mix(base, "#9a9aa0", 0.55))
+            or (selected and base or dotws.mix(base, ui.color.text_dim, 0.55))
         ui.set_markup(label, string.format(
             '<span font="FontAwesome 7" foreground="%s">%s</span>', fg, FA_CIRCLE))
         root.bg = selected and (base .. "2e")
-            or (occupied and "#ffffff0d" or "#00000000")
+            or (occupied and ui.color.occupied or ui.color.transparent)
         root.border_width = selected and 1 or 0
         root.border_color = base .. "55"
         tick.visible = occupied
@@ -210,10 +210,10 @@ local function paint_pill(root, tag, label, tick)
     else fg = ui.color.text_faint end
 
     ui.set_markup(label, ui.span(ui.truncate(tag.name or "?", 2), fg,
-        selected and "Inter SemiBold 9" or ui.font.small))
+        selected and ui.font.mark or ui.font.small))
 
     root.bg = selected and ui.color.accent_bg
-        or (occupied and "#ffffff0d" or "#00000000")
+        or (occupied and ui.color.occupied or ui.color.transparent)
     root.border_width = 0
     tick.visible = occupied or selected
     tick.bg = urgent and ui.color.warn
@@ -253,7 +253,7 @@ local function tag_template(buttons)
                 {
                     id = "tick",
                     bg = ui.color.accent,
-                    shape = gears.shape.rounded_rect,
+                    shape = ui.radius_shape.pill,
                     forced_width = 9,
                     forced_height = 2,
                     widget = wibox.container.background,
@@ -264,8 +264,8 @@ local function tag_template(buttons)
             layout = wibox.layout.stack,
         },
         id = "pill",
-        bg = "#00000000",
-        shape = gears.shape.rounded_rect,
+        bg = ui.color.transparent,
+        shape = ui.radius_shape.pill,
         forced_width = PILL_W,
         forced_height = PILL_H,
         widget = wibox.container.background,
@@ -281,7 +281,7 @@ local function tag_template(buttons)
             ui.hover(self, function()
                 local occupied = #real_clients(tag) > 0
                 if tag.selected then return ui.color.accent_bg end
-                return occupied and "#ffffff0d" or "#00000000"
+                return occupied and ui.color.occupied or ui.color.transparent
             end, function()
                 return tag.selected and ui.color.accent_bg_hi or ui.color.hover
             end)

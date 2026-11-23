@@ -70,7 +70,7 @@ local function update_block(b)
         ui.set_text(b.state, "", ui.color.text_faint, ui.font.tiny)
         ui.set_text(b.marks, "", ui.color.text_faint, "FontAwesome 8")
         b.root._aether_no_hover = true
-        b.root.bg = "#00000000"
+        b.root.bg = ui.color.transparent
         return
     end
 
@@ -120,9 +120,9 @@ local function detail_popover(c)
     local tag = c.first_tag
     local layout = tag and awful.layout.getname(awful.layout.get(tag.screen)) or "—"
 
-    local title = ui.text{ font = "Inter SemiBold 11", wrap = "word", width = 292 }
+    local title = ui.text{ font = ui.font.clock, wrap = "word", width = 292 }
     ui.set_markup(title, ui.span(c.name ~= "" and c.name or "(untitled)",
-        ui.color.text, "Inter SemiBold 11"))
+        ui.color.text, ui.font.clock))
 
     local head = wibox.widget{
         ui.cell(ui.app_icon(c, 20)),
@@ -180,7 +180,7 @@ end
 -- revalidates it: the surface can never fire an action into a dead client.
 local function build_controls()
     local icon = ui.icon_slot(22)
-    local app = ui.text{ font = "Inter SemiBold 11", width = 236, ellipsize = "end" }
+    local app = ui.text{ font = ui.font.clock, width = 236, ellipsize = "end" }
     local title = ui.text{ font = ui.font.small, width = 300, ellipsize = "end" }
     local meta = ui.text{ font = ui.font.tiny, width = 300, ellipsize = "end" }
     local marks = ui.text{ font = ui.font.tiny, align = "right" }
@@ -319,7 +319,7 @@ local function build_controls()
             return
         end
         icon.set(c)
-        ui.set_text(app, ui.app_name(c), ui.color.text, "Inter SemiBold 11")
+        ui.set_text(app, ui.app_name(c), ui.color.text, ui.font.clock)
         ui.set_text(title, c.name ~= "" and c.name or "(untitled)",
             ui.color.text_dim, ui.font.small)
         local tag = c.first_tag
@@ -473,17 +473,17 @@ function M.widget(s)
     }
 
     local root = wibox.container.background()
-    root.shape = gears.shape.rounded_rect
-    root.bg = "#00000000"
+    root.shape = ui.radius_shape.card
+    root.bg = ui.color.transparent
     local place = wibox.container.place(ui.pad(row, 10, 10, 0, 0))
     place.valign = "center"
     place.halign = "left"
     root.widget = place
     root.forced_width = 340
-    root.forced_height = 28
+    root.forced_height = ui.block_h
 
-    ui.hover(root, function() return "#00000000" end, function()
-        return b.client and ui.color.hover or "#00000000"
+    ui.hover(root, function() return ui.color.transparent end, function()
+        return b.client and ui.color.hover or ui.color.transparent
     end)
 
     root:buttons(gears.table.join(

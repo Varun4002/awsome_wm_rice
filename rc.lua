@@ -74,17 +74,18 @@ beautiful.init(gears.filesystem.get_themes_dir() .. "default/theme.lua")
 
 -- macOS frosted top bar: Inter for the wibar widgets, white-on-dark
 -- colors, transparent item backgrounds so the frosted backdrop stays
--- visible (beautiful.font itself is left untouched).
-beautiful.taglist_font = "Inter Medium 10"
-beautiful.tasklist_font = "Inter Medium 10"
-beautiful.taglist_bg_normal = "#00000000"
-beautiful.taglist_bg_focus  = "#00000000"
-beautiful.taglist_fg_normal = "#9a9aa0"
-beautiful.taglist_fg_focus  = "#f2f2f7"
-beautiful.tasklist_bg_normal = "#00000000"
+-- visible (beautiful.font itself is left untouched).  Foregrounds use the
+-- ui token palette so taglist/tasklist text matches bar and popover text.
+beautiful.taglist_font = ui.font.body
+beautiful.tasklist_font = ui.font.body
+beautiful.taglist_bg_normal = ui.color.transparent
+beautiful.taglist_bg_focus  = ui.color.transparent
+beautiful.taglist_fg_normal = ui.color.text_dim
+beautiful.taglist_fg_focus  = ui.color.text
+beautiful.tasklist_bg_normal = ui.color.transparent
 beautiful.tasklist_bg_focus  = "#3a3a3c60"
-beautiful.tasklist_fg_normal = "#9a9aa0"
-beautiful.tasklist_fg_focus  = "#f2f2f7"
+beautiful.tasklist_fg_normal = ui.color.text_dim
+beautiful.tasklist_fg_focus  = ui.color.text
 
 -- Frosted-glass windows: border/menu/notification theme, focus-aware window
 -- opacity and the compositor lifecycle (see glass.lua for the tuning knobs).
@@ -174,16 +175,16 @@ local function aether_mark()
     ui.set_text(label, "AETHER", ui.color.text_dim, ui.font.mark)
 
     local root = wibox.container.background()
-    root.shape = gears.shape.rounded_rect
-    root.bg = "#00000000"
-    root.forced_height = 28
+    root.shape = ui.radius_shape.chip
+    root.bg = ui.color.transparent
+    root.forced_height = ui.block_h
     root.widget = wibox.container.place(ui.pad(wibox.widget{
         { ui.dot(ui.color.accent, 5), right = 8, widget = wibox.container.margin },
         label,
         layout = wibox.layout.fixed.horizontal,
     }, 7, 10, 0, 0))
 
-    ui.hover(root, function() return "#00000000" end, ui.color.hover,
+    ui.hover(root, function() return ui.color.transparent end, ui.color.hover,
         function() ui.set_text(label, "AETHER", ui.color.text, ui.font.mark) end,
         function() ui.set_text(label, "AETHER", ui.color.text_dim, ui.font.mark) end)
 
@@ -230,9 +231,10 @@ awful.screen.connect_for_each_screen(function(s)
 
     -- Create a promptbox for each screen
     s.mypromptbox = awful.widget.prompt()
-    -- Create an imagebox widget which will contain an icon indicating which layout we're using.
-    -- We need one layoutbox per screen.
-    s.mylayoutbox = awful.widget.layoutbox(s)
+    -- Create the layout indicator: a token-coloured cairo glyph instead of
+    -- the stock layoutbox PNGs (U1).  Same buttons — it is still the layout
+    -- switch.
+    s.mylayoutbox = ui.layout_indicator(s)
     s.mylayoutbox:buttons(gears.table.join(
                            awful.button({ }, 1, function () awful.layout.inc( 1) end),
                            awful.button({ }, 3, function () awful.layout.inc(-1) end),
@@ -253,7 +255,7 @@ awful.screen.connect_for_each_screen(function(s)
     s.mywibox = awful.wibar({ position = "top", screen = s, height = ui.bar_height, ontop = true })
     -- Matches the frost fallback color; the frost widget paints over the
     -- bar background, but the systray's embedded X window uses this color.
-    s.mywibox.bg = "#0e0e10"
+    s.mywibox.bg = frostbar.fallback_bg
 
     -- Layer 1 assembly.  The centre slot of align.horizontal is centred on
     -- the whole bar width, so the active-window block stays optically
@@ -283,7 +285,20 @@ awful.screen.connect_for_each_screen(function(s)
             ui.pad(ui.vrule(16), 8, 8, 0, 0),
             ui.pad(keyboardlayout, 0, 6, 0, 0),
             ui.pad(s.mylayoutbox, 0, 4, 0, 0),
-            wibox.widget.systray(),
+            -- Tray as a designed sunken cell: 4.3 has one systray and no
+            -- client count, so screen 2 would otherwise show an unexplained
+            -- gap.  A fixed-width cell reads as a deliberate empty slot (U3).
+            {
+                {
+                    wibox.widget.systray(),
+                    margins = 4,
+                    widget  = wibox.container.margin,
+                },
+                bg = ui.color.bg_sunken,
+                shape = ui.radius_shape.chip,
+                forced_width = ui.bar_height - 8,
+                widget = wibox.container.background,
+            },
             ui.pad(ui.vrule(16), 8, 8, 0, 0),
             control_center.new_button(),
             ui.pad(ui.vrule(16), 8, 8, 0, 0),
@@ -470,6 +485,11 @@ globalkeys = gears.table.join(
             if client.focus then client.focus:kill() end
         end,
         {description = "close focused app", group = "client"}),
+
+    -- Keyboard route to layer 3: the window-controls surface for the focused
+    -- client, previously reachable only by clicking its bar block (U5).
+    awful.key({ modkey }, "i", windower.open_controls,
+              {description = "focused window controls", group = "client"}),
 
     -- Print saves a full-screen PNG into ~/Pictures/Screenshots.
     awful.key({ }, "Print",

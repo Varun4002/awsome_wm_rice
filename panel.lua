@@ -121,7 +121,7 @@ local function window_rows(on_pick)
         if shown >= 4 then break end
         shown = shown + 1
         local focused = (c == client.focus)
-        local dot = ui.dot(focused and ui.color.accent or "#ffffff1f", 4)
+        local dot = ui.dot(focused and ui.color.accent or ui.color.idle_dot, 4)
         local title = ui.text{ font = ui.font.small, ellipsize = "end", width = 214 }
         ui.set_text(title, c.name ~= "" and c.name or "(untitled)",
             focused and ui.color.text or ui.color.text_dim)
@@ -132,8 +132,8 @@ local function window_rows(on_pick)
             c.minimized and " · min" or ""), ui.color.text_faint)
 
         local row = wibox.container.background()
-        row.shape = gears.shape.rounded_rect
-        row.bg = focused and "#ffffff0d" or "#00000000"
+        row.shape = ui.radius_shape.card
+        row.bg = focused and ui.color.occupied or ui.color.transparent
         row.forced_height = 24
         row.widget = ui.pad(wibox.widget{
             wibox.widget{
@@ -147,7 +147,7 @@ local function window_rows(on_pick)
             layout = wibox.layout.align.horizontal,
         }, 4, 4, 0, 0)
         ui.hover(row, function()
-            return focused and "#ffffff0d" or "#00000000"
+            return focused and ui.color.occupied or ui.color.transparent
         end, ui.color.hover)
         row:buttons(gears.table.join(awful.button({}, 1, function()
             if not c.valid then return end
@@ -174,8 +174,8 @@ local function build(s)
     root.spacing = 8
 
     -- header -------------------------------------------------------------
-    local mark = ui.text{ font = "Inter SemiBold 12" }
-    ui.set_markup(mark, ui.span("AETHER", ui.color.text, "Inter SemiBold 12"))
+    local mark = ui.text{ font = ui.font.title }
+    ui.set_markup(mark, ui.span("AETHER", ui.color.text, ui.font.title))
     local time = ui.text{ font = ui.font.strong, align = "right", width = 140 }
     local date = ui.text{ font = ui.font.tiny, align = "right", width = 140 }
     local detach_clock = clock.attach(time, date)
