@@ -385,7 +385,7 @@ reveal_timer = gears.timer{ timeout = 0.08, callback = function()
                 if not b.visible then
                     b.visible = true
                     b.opacity = 0
-                    anim.tween{ tag = "bar_reveal_" .. tostring(s.index), duration = 0.15,
+                    anim.tween{ tag = "bar_reveal_" .. tostring(s.index), duration = ui.motion.base,
                         step = function(t) b.opacity = t end,
                         done = function() b.opacity = 1 end }
                 end

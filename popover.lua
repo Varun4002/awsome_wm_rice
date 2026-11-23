@@ -23,7 +23,6 @@ local gears = require("gears")
 local wibox = require("wibox")
 
 local ui  = require("ui")
-local anim = require("anim")
 
 local M = {}
 
@@ -43,8 +42,10 @@ local back_stack = {}
 local backing = false
 local BACK_DEPTH = 2
 
-local HOVER_DELAY = 0.14
-local HOVER_CLOSE = 0.10
+-- Hover pacing comes from the motion scale, so the wait before a reveal and
+-- the grace before it closes move at the same pace as the surfaces themselves.
+local HOVER_DELAY = ui.motion.base
+local HOVER_CLOSE = ui.motion.fast
 
 -- While a bar-level drag is in progress the pointer sweeps across other
 -- widgets; hovering must not pop cards open underneath it. Set by the
@@ -168,11 +169,16 @@ local function place(s, content, anchor)
                     width = math.floor(w), height = math.floor(h) }
 end
 
-local function fade_in()
-    popup.opacity = 0
-    anim.tween{ tag = "aether_popover", duration = 0.14, step = function(t)
-        popup.opacity = t
-    end }
+local function apply(spec, s, anchor)
+    local body = ui.surface(spec.content, spec.width)
+    popup.widget = body
+    place(s, body, anchor)
+    -- Opaque before the map. The entrance is animated GPU-side by picom (the
+    -- window_type 'menu' rule in picom.conf), not here: a WM-thread tween on
+    -- a blurred, shadowed wibox costs a full repaint plus a blur re-composite
+    -- per frame, which reads as lag. With picom dead this is simply instant.
+    popup.opacity = 1
+    popup.visible = true
 end
 
 function M.active()
@@ -201,14 +207,6 @@ function M.subscribe(fn)
 end
 
 -------------------------------------------------------------------------- open / close
-
-local function apply(spec, s, anchor)
-    local body = ui.surface(spec.content, spec.width)
-    popup.widget = body
-    place(s, body, anchor)
-    popup.visible = true
-    fade_in()
-end
 
 --- Show (or update in place) a popover.
 -- spec = {
@@ -286,11 +284,10 @@ function M.close(reason)
     current = nil
     if old.spec.on_close then pcall(old.spec.on_close, reason or "close") end
     if popup and popup.visible then
-        anim.tween{ tag = "aether_popover", duration = 0.10, step = function(t)
-            popup.opacity = 1 - t
-        end, done = function()
-            if not current and popup then popup.visible = false end
-        end }
+        -- Instant unmap; picom's disappear script (window_type 'menu') draws
+        -- the exit GPU-side. Keeping the WM thread out of the per-frame loop
+        -- is the whole point; see apply().
+        popup.visible = false
     end
     notify()
 end

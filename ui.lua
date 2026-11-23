@@ -90,6 +90,16 @@ M.radius = { popup = 12, card = 10, chip = 7, pill = 7 }
 -- read; every new spacing must come from here.
 M.space = { xxs = 2, xs = 4, s = 8, m = 12, l = 16, xl = 24, xxl = 32 }
 
+-- Motion scale. Every animation duration in the config reads from here so
+-- all surfaces move at the same pace; adding a surface must not invent a
+-- new timing. fast = dismissals, base = entrances and reveals,
+-- slow = large surfaces settling.
+M.motion = {
+    fast = 0.10,
+    base = 0.14,
+    slow = 0.20,
+}
+
 -- Drop-in shape functions bound to the radius tokens: `widget.shape =
 -- ui.radius_shape.chip` instead of a bare rounded_rect, which silently
 -- falls back to gears' default radius 10 and made M.radius dead.
@@ -100,7 +110,7 @@ for rname, rval in pairs(M.radius) do
     end
 end
 
-M.block_h = 24 -- height of a bar block (clock, window, ...) inside the 38 px bar
+M.block_h = 28 -- height of a bar block (clock, window, ...): fits two text lines in the 38 px bar
 
 local FA = "FontAwesome "
 

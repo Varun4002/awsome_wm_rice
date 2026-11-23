@@ -9,6 +9,9 @@
 --------------------------------------------------------------------------
 
 local gears = require("gears")
+-- ui.motion is the one duration scale (ui.lua does not require anim, so the
+-- dependency is one-way: anim → ui).
+local ui = require("ui")
 
 local M = {}
 
@@ -41,6 +44,12 @@ gears.timer {
 M.ease = {
     linear    = function(t) return t end,
     out_cubic = function(t) return 1 - (1 - t) * (1 - t) * (1 - t) end,
+    -- Symmetric ease for movement (slides): zero velocity at both ends so a
+    -- surface settles instead of stopping dead. Opacity keeps out_cubic.
+    in_out_cubic = function(t)
+        if t < 0.5 then return 4 * t * t * t end
+        return 1 - ((-2 * t + 2) ^ 3) / 2
+    end,
     -- macOS pop-in: slight overshoot on the way to the target.
     out_back  = function(t)
         local c1, c3 = 1.70158, 2.70158
@@ -51,7 +60,7 @@ M.ease = {
 
 function M.tween(args)
     local tag   = args.tag or tostring(args.step)
-    local dur   = args.duration or 0.15
+    local dur   = args.duration or ui.motion.base
     local steps = math.max(1, math.ceil(dur * 60))
     local ease  = args.ease or M.ease.out_cubic
     local i     = 0
@@ -84,6 +93,14 @@ end
 
 function M.stop(tag)
     if active[tag] then active[tag]:stop(); active[tag] = nil end
+end
+
+--- Fade a wibox/widget opacity from `from` to `to`. Returns the tween.
+function M.opacity(w, from, to, tag, dur)
+    w.opacity = from
+    return M.tween{ tag = tag, duration = dur, step = function(t)
+        w.opacity = from + (to - from) * t
+    end }
 end
 
 return M

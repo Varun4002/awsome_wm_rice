@@ -711,21 +711,20 @@ local function osd_show(anchor, s)
         x = anchor.x + math.floor((anchor.width - OSD_W) / 2)
     end
     x = math.max(g.x + 8, math.min(x, g.x + g.width - OSD_W - 8))
-    osd:geometry{ x = x, y = g.y + ((s.mywibox and s.mywibox.height) or ui.bar_height) + 6,
-                  width = OSD_W, height = OSD_H }
+    local final_y = g.y + ((s.mywibox and s.mywibox.height) or ui.bar_height) + 6
+    osd:geometry{ x = x, y = final_y, width = OSD_W, height = OSD_H }
+    -- Opaque before the map: the entrance is picom's (type menu, see
+    -- popover.lua). A WM-thread slide tween on a blurred wibox re-composites
+    -- the blur every frame and reads as lag.
+    osd.opacity = 1
     osd.visible = true
-    anim.tween{ tag = "frostbar_vol_osd", duration = 0.12, step = function(t)
-        osd.opacity = t
-    end }
 end
 
 local function osd_hide()
     if not (osd and osd.visible) then return end
-    anim.tween{ tag = "frostbar_vol_osd", duration = 0.15, step = function(t)
-        osd.opacity = 1 - t
-    end, done = function()
-        if not drag and osd then osd.visible = false end
-    end }
+    -- Instant unmap; picom draws the exit. The drag guard matters: an unmap
+    -- mid-scrub would kill the HUD the user is interacting with.
+    if not drag then osd.visible = false end
 end
 
 function volume_drag_finish()

@@ -4,8 +4,12 @@
 -- One fullscreen wibox per screen (ontop=false, type="desktop",
 -- input_passthrough=true) painted by a custom widget. Every screen shows
 -- the SAME wallpaper, chosen randomly from cfg.directory, and all screens
--- crossfade to the next one together: the fade is one timer and one
--- progress value shared by all screens, so the change is seamless.
+-- transition to the next one together: the transition is one timer, one
+-- progress value and one style shared by all screens, so the change is
+-- seamless.  The style itself is random per switch (crossfade, settle,
+-- bloom, drift, push — never the same twice running) with a randomised
+-- magnitude, direction and duration, so consecutive transitions never
+-- look choreographed the same way.
 --
 -- Screen-sized copies are pre-baked by ImageMagick in a background process
 -- into ~/.cache/awesome-wallpaper/ so switches never stall the WM thread.
@@ -29,6 +33,7 @@ local lgi   = require("lgi")
 local GLib  = lgi.GLib
 local cairo = lgi.cairo
 local lfs   = require("lfs")
+local anim  = require("anim") -- reduced-motion preference (gsettings poll)
 
 local screen = screen
 
@@ -37,10 +42,43 @@ local M = {}
 local cfg = {
     directory = nil,
     interval  = 1800,                                  -- seconds between switches
-    fade      = 2.0,                                   -- crossfade duration
+    fade      = 2.0,                                   -- base transition duration
     tick      = 0.016,                                 -- animation frame interval
     cache_dir = os.getenv("HOME") .. "/.cache/awesome-wallpaper",
 }
+
+-- Transition styles. paint_frame interpolates a spec with:
+--   zoom    incoming scale offset at t=0; positive settles down (starts
+--           larger), negative blooms up (starts smaller)
+--   slide   incoming offset at t=0 as a fraction of the screen axis
+--   dir     which edge a slide enters from ({x=±1,y=0} or {x=0,y=±1})
+--   counter outgoing counter-drift amplitude (fraction of the axis)
+-- Every offset is 0 at t=1, so the committed 1:1 frame never snaps.
+local STYLES = { "crossfade", "settle", "bloom", "drift", "push" }
+local last_style = nil
+
+local function pick_transition()
+    local style = last_style
+    while style == last_style and #STYLES > 1 do
+        style = STYLES[math.random(#STYLES)]
+    end
+    last_style = style
+    local spec = { style = style }
+    if style == "settle" then
+        spec.zoom = 0.03 + math.random() * 0.03            -- 1.03 .. 1.06
+    elseif style == "bloom" then
+        spec.zoom = -(0.03 + math.random() * 0.03)         -- 0.97 .. 0.94
+    elseif style == "drift" or style == "push" then
+        local axis, sign = math.random(2), (math.random(2) == 1) and 1 or -1
+        spec.dir = (axis == 1) and { x = sign, y = 0 } or { x = 0, y = sign }
+        spec.slide = (style == "drift") and (0.05 + math.random() * 0.04)
+                                            or (0.11 + math.random() * 0.05)
+        -- Push adds a gentle give on the outgoing image: it drifts a little
+        -- against the incoming slide and returns (sin, zero at both ends).
+        if style == "push" then spec.counter = 0.02 + math.random() * 0.01 end
+    end
+    return spec
+end
 
 local started       = false
 local bag           = {}    -- paths still awaiting their turn (shuffle bag)
@@ -52,7 +90,9 @@ local screens       = {}    -- [screen] = per-screen state table
 local fade_timer, switch_timer, attach_fn
 local building      = {}    -- cache files currently being built by magick
 local fading        = false
-local t             = 0     -- crossfade progress, shared by all screens
+local t             = 0     -- transition progress, shared by all screens
+local fade_dur      = nil   -- duration of the running transition (jittered)
+local tx            = nil   -- the running transition spec (pick_transition)
 local incoming_path = nil    -- path being faded in (nil when idle)
 local subscribers   = {}    -- callbacks notified on every frame change
 local state_file    = nil    -- remembers the current path across restarts
@@ -220,7 +260,7 @@ end
 
 -------------------------------------------------------------------------- painting
 
--- Paint the current frame (or the crossfade) onto a cairo context.
+-- Paint the current frame (or the running transition) onto a cairo context.
 local function paint_frame(st, cr, w, h)
     local cur, nxt = st.cur, st.nxt
     if not cur then
@@ -235,15 +275,38 @@ local function paint_frame(st, cr, w, h)
         cr:paint()
         return
     end
-    -- Old image static underneath; incoming fades in on top while
-    -- zooming 1.04 -> 1.0 (ease-out-cubic), centred.
-    cr:set_source_surface(cur, 0, 0)
-    cr.operator = cairo.Operator.SOURCE
-    cr:paint()
+    local spec = tx or {}
+
+    -- Alpha: smoothstep, the same symmetric curve a crossfade wants.  All
+    -- movement below eases out (decelerates into place) so surfaces settle,
+    -- matching the ease-out convention of the UI motion layer.
     local alpha = t * t * (3 - 2 * t)                    -- smoothstep
-    local e     = 1 - (1 - t) * (1 - t) * (1 - t)        -- ease-out-cubic
-    local zoom  = 1 + 0.04 * (1 - e)
-    cr:translate(w / 2, h / 2)
+    local e_out = 1 - (1 - t) * (1 - t) * (1 - t)        -- ease-out-cubic
+
+    -- Outgoing counter-drift (push only): a gentle give against the incoming
+    -- slide, sin() so it is 0 with zero velocity at both ends — the committed
+    -- 1:1 frame therefore never snaps.
+    local counter = spec.counter or 0
+    if counter > 0 then
+        local cx = counter * math.sin(math.pi * t) * w * -(spec.dir and spec.dir.x or 0)
+        local cy = counter * math.sin(math.pi * t) * h * -(spec.dir and spec.dir.y or 0)
+        cr:translate(cx, cy)
+        cr:set_source_surface(cur, 0, 0)
+        cr.operator = cairo.Operator.SOURCE
+        cr:paint()
+        cr:translate(-cx, -cy)
+    else
+        cr:set_source_surface(cur, 0, 0)
+        cr.operator = cairo.Operator.SOURCE
+        cr:paint()
+    end
+
+    -- Incoming: optional scale (zoom) and offset (slide from an edge), both
+    -- interpolating to identity at t=1.
+    local zoom = 1 + (spec.zoom or 0) * (1 - e_out)
+    local ox = (spec.slide or 0) * (1 - e_out) * w * (spec.dir and spec.dir.x or 0)
+    local oy = (spec.slide or 0) * (1 - e_out) * h * (spec.dir and spec.dir.y or 0)
+    cr:translate(w / 2 + ox, h / 2 + oy)
     cr:scale(zoom, zoom)
     cr:translate(-w / 2, -h / 2)
     cr:set_source_surface(nxt, 0, 0)
@@ -305,6 +368,7 @@ local function commit_all()
     t = 1
     incoming_path = nil
     outgoing_path = nil
+    tx, fade_dur = nil, nil
     sync_root() -- root follows the committed image (no theme flash on reload)
     fade_timer:stop() -- idle cost is zero between fades
     notify()
@@ -315,7 +379,7 @@ local function fade_tick()
         fade_timer:stop()
         return
     end
-    t = t + cfg.tick / cfg.fade
+    t = t + cfg.tick / (fade_dur or cfg.fade)
     if t >= 1 then
         commit_all()
         precache()
@@ -333,8 +397,7 @@ local function switch()
     pending_path = nil
     if not path or not is_file(path) then path = pick() end
     if not path then return end
-
-    outgoing_path = current_path -- the bar's blur fades from this one
+    local prev = current_path
 
     local ready = false
     for s, st in pairs(screens) do
@@ -348,12 +411,30 @@ local function switch()
 
     current_path = path
     remember(path)
+
+    -- The desktop has animations off (gsettings enable-animations): land the
+    -- new wallpaper without a transition, same respect the UI motion layer pays.
+    if not anim.animations then
+        outgoing_path = nil
+        commit_all()
+        precache()
+        print("wallpaper_cycler: switched to " .. path .. " (reduced motion, instant)")
+        return
+    end
+
+    outgoing_path = prev -- the bar's blur fades from this one
+
+    -- Unique-feeling transition: a random style (never twice the same) with a
+    -- randomised magnitude/direction, over a jittered duration around cfg.fade.
+    tx = pick_transition()
+    fade_dur = cfg.fade * (0.8 + math.random() * 0.4)
     incoming_path = path
     t = 0
     fading = true
     fade_timer:again()
     notify()
-    print("wallpaper_cycler: fading in " .. path)
+    print("wallpaper_cycler: fading in " .. path .. " (" .. tx.style ..
+        ", " .. string.format("%.2f", fade_dur) .. "s)")
 end
 
 local function show_initial()
@@ -452,18 +533,22 @@ function M.setup(args)
     }
     started = true
     print("wallpaper_cycler: started, directory=" .. tostring(cfg.directory) ..
-        " interval=" .. tostring(cfg.interval) .. "s fade=" .. tostring(cfg.fade) .. "s")
+        " interval=" .. tostring(cfg.interval) ..
+        "s fade=" .. tostring(cfg.fade) .. "s (styles: " .. table.concat(STYLES, ", ") .. ")")
 end
 
 function M.stop()
-    if switch_timer then switch_timer:stop() end
-    if fade_timer then fade_timer:stop() end
+    -- gears.timer:stop() errors "timer not started" in 4.3, and the hot-reload
+    -- teardown legitimately stops idle timers.
+    if switch_timer and switch_timer.started then switch_timer:stop() end
+    if fade_timer and fade_timer.started then fade_timer:stop() end
     for _, st in pairs(screens) do
         st.wb.visible = false
     end
     screens, bag, seen = {}, {}, {}
     current_path, pending_path = nil, nil
     incoming_path, fading, t = nil, false, 0
+    fade_dur, tx, last_style = nil, nil, nil
     outgoing_path = nil
     subscribers = {}
     if attach_fn then awful.screen.disconnect_for_each_screen(attach_fn) end
@@ -505,14 +590,16 @@ function M.status()
         pending = pending_path,
         fading  = fading,
         t       = t,
+        style   = tx and tx.style or nil,
         screens = count,
     }
 end
 
 -- What a dependent (the top bar's blur) needs to paint in sync: while idle
--- the wallpaper every screen shows; while fading, the path being faded OUT
--- (outgoing), the one being faded IN (incoming) and the shared progress.
--- NOTE: during a fade current_path already points at the incoming path.
+-- the wallpaper every screen shows; while transitioning, the path being
+-- faded OUT (outgoing), the one being faded IN (incoming), the shared
+-- progress and the running style.
+-- NOTE: during a transition current_path already points at the incoming path.
 function M.frames()
     return {
         current  = current_path,
@@ -520,6 +607,7 @@ function M.frames()
         outgoing = outgoing_path,
         t        = t,
         fading   = fading,
+        style    = tx and tx.style or nil,
     }
 end
 

@@ -97,7 +97,7 @@ local function make_switch(id, on_toggle)
     pill.widget = wibox.container.place(slide)
 
     local function set_knob(on)
-        anim.tween{ tag = "cc_switch_" .. id, duration = 0.16,
+        anim.tween{ tag = "cc_switch_" .. id, duration = ui.motion.base,
             step = function(t)
                 slide.left  = on and 4 + 18 * t or 22 - 18 * t
                 slide.right = on and 22 - 18 * t or 4 + 18 * t
