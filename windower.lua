@@ -68,7 +68,7 @@ local function update_block(b)
         ui.set_text(b.app, "Desktop", ui.color.text_dim, ui.font.strong)
         ui.set_text(b.title, "No window focused", ui.color.text_faint, ui.font.small)
         ui.set_text(b.state, "", ui.color.text_faint, ui.font.tiny)
-        ui.set_text(b.marks, "", ui.color.text_faint, "FontAwesome 8")
+        ui.set_text(b.marks, "", ui.color.text_faint, ui.glyph_font.s)
         b.root._aether_no_hover = true
         b.root.bg = ui.color.transparent
         return
@@ -92,7 +92,7 @@ local function update_block(b)
     if c.sticky then marks[#marks + 1] = FA_PIN end
     if c.ontop then marks[#marks + 1] = FA_UP end
     ui.set_text(b.marks, table.concat(marks, " "),
-        active and ui.color.text_dim or ui.color.text_faint, "FontAwesome 8")
+        active and ui.color.text_dim or ui.color.text_faint, ui.glyph_font.s)
 end
 
 local function update_all()
@@ -413,6 +413,7 @@ local function open_controls()
         content = surface.widget,
         width = 344,
         modal = true,
+        reopen = open_controls,
         on_open = surface.connect,
         on_close = function()
             surface.disconnect()
@@ -468,14 +469,14 @@ function M.widget(s)
 
     local row = wibox.widget{
         ui.cell(b.icon.widget),
-        { column, left = 9, widget = wibox.container.margin },
+        { column, left = ui.space.s, widget = wibox.container.margin },
         layout = wibox.layout.fixed.horizontal,
     }
 
     local root = wibox.container.background()
     root.shape = ui.radius_shape.card
     root.bg = ui.color.transparent
-    local place = wibox.container.place(ui.pad(row, 10, 10, 0, 0))
+    local place = wibox.container.place(ui.pad(row, ui.space.s, ui.space.s, 0, 0))
     place.valign = "center"
     place.halign = "left"
     root.widget = place

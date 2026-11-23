@@ -28,7 +28,8 @@ local M = {}
 
 local PILL_W, PILL_H = 24, 20
 
-local FA_CIRCLE = "\u{f111}" -- the dot workspace's indicator glyph
+local FA_CIRCLE = "\u{f111}" -- occupancy dot in the other-screen chip
+local FA_PICTURE = "\u{f03e}" -- the showcase (wallpaper) control
 
 local function client_state(c)
     if c.fullscreen then return "fullscreen" end
@@ -58,7 +59,7 @@ local function preview_row(c)
     ui.set_markup(tb, ui.span(ui.truncate(title, 38) .. (c.minimized and "  ·min" or ""),
         focused and ui.color.text or ui.color.text_dim))
     return wibox.widget{
-        ui.cell(ui.app_icon(c, 14)),
+        ui.cell(ui.app_icon(c, 16)),
         { tb, left = 8, widget = wibox.container.margin },
         layout = wibox.layout.fixed.horizontal,
         forced_height = 20,
@@ -67,6 +68,7 @@ end
 
 local function build_preview(t)
     if not t or not t.valid then return nil end
+    local is_dot = dotws.is_dot(t)
     local clients = real_clients(t)
     local rows = {}
     local shown = 0
@@ -76,7 +78,8 @@ local function build_preview(t)
     end
     if #rows == 0 then
         rows[1] = ui.text{ font = ui.font.small,
-                           markup = ui.span("No windows on this workspace",
+                           markup = ui.span(is_dot and "Just the wallpaper"
+                                                or "No windows on this workspace",
                                             ui.color.text_faint) }
     elseif shown > #rows then
         rows[#rows + 1] = ui.text{
@@ -86,26 +89,33 @@ local function build_preview(t)
         }
     end
 
+    -- The dot is a mode, not a workspace: its label names the mode, not a slot
+    -- number (navigation §3.2 — "Workspace ." predicted nothing).
     local head = wibox.widget{
         ui.text{ font = ui.font.strong,
-                 markup = ui.span("Workspace " .. (t.name or ""), ui.color.text) },
+                 markup = ui.span(is_dot and "Showcase"
+                                     or ("Workspace " .. (t.name or "")),
+                                  ui.color.text) },
         nil,
         ui.text{ font = ui.font.small, align = "right",
-                 markup = ui.span(string.format("%d window%s", #clients,
-                     #clients == 1 and "" or "s"), ui.color.text_dim) },
+                 markup = ui.span(is_dot and "wallpaper"
+                                     or string.format("%d window%s", #clients,
+                                          #clients == 1 and "" or "s"),
+                                  ui.color.text_dim) },
         layout = wibox.layout.align.horizontal,
     }
 
     local body = {
         layout = wibox.layout.fixed.vertical,
-        spacing = 6,
+        spacing = ui.space.s,
         head,
         ui.divider(),
     }
     for _, r in ipairs(rows) do body[#body + 1] = r end
     body[#body + 1] = ui.text{
         font = ui.font.tiny,
-        markup = ui.span("Click to switch · right-click for actions",
+        markup = ui.span(is_dot and "Click to show the wallpaper · right-click for actions"
+                         or "Click to switch · right-click for actions",
                          ui.color.text_faint),
     }
 
@@ -121,7 +131,7 @@ end
 local function action_row(label, active, enabled, onclick)
     local chip = ui.chip{
         label = label, active = active, enabled = enabled,
-        align = "left", width = 214, height = 26, flat = false,
+        align = "left", width = 214, height = 24, flat = false,
         font = ui.font.body,
         onclick = onclick,
     }
@@ -146,10 +156,12 @@ local function build_actions(t)
 
     local content = {
         layout = wibox.layout.fixed.vertical,
-        spacing = 4,
+        spacing = ui.space.xs,
         wibox.widget{
             { ui.text{ font = ui.font.strong,
-                       markup = ui.span("Workspace " .. (t.name or ""), ui.color.text) },
+                       markup = ui.span(dotws.is_dot(t) and "Showcase"
+                                            or ("Workspace " .. (t.name or "")),
+                                        ui.color.text) },
               left = 4, widget = wibox.container.margin },
             nil,
             ui.text{ font = ui.font.tiny, align = "right",
@@ -178,6 +190,17 @@ local function build_actions(t)
     }
 end
 
+--- Open the action surface for a tag.  Named so the popover back-stack can
+-- rebuild it (navigation N8): a surface that is replaced by another modal
+-- layer is reachable again with BackSpace.
+local function open_actions(t)
+    local spec = build_actions(t)
+    if not spec then return end
+    spec.id = "ws-actions"
+    spec.reopen = function() open_actions(t) end
+    popover.show(spec)
+end
+
 -------------------------------------------------------------------------- pill template
 
 local function paint_pill(root, tag, label, tick)
@@ -185,29 +208,11 @@ local function paint_pill(root, tag, label, tick)
     local occupied = #real_clients(tag) > 0
     local urgent = tag.urgent
 
-    if dotws.is_dot(tag) then
-        -- The dot: a small elegant circle in a wallpaper-derived accent,
-        -- dimmed at rest, full accent with a restrained glow ring when
-        -- selected.  No label, no decoration competing with the wallpaper.
-        local base = dotws.accent_color
-        local fg = urgent and ui.color.warn
-            or (selected and base or dotws.mix(base, ui.color.text_dim, 0.55))
-        ui.set_markup(label, string.format(
-            '<span font="FontAwesome 7" foreground="%s">%s</span>', fg, FA_CIRCLE))
-        root.bg = selected and (base .. "2e")
-            or (occupied and ui.color.occupied or ui.color.transparent)
-        root.border_width = selected and 1 or 0
-        root.border_color = base .. "55"
-        tick.visible = occupied
-        tick.bg = urgent and ui.color.warn or base
-        return
-    end
-
     local fg
     if urgent then fg = ui.color.warn
     elseif selected then fg = ui.color.accent_hi
     elseif occupied then fg = ui.color.text
-    else fg = ui.color.text_faint end
+    else fg = ui.color.text_dim end
 
     ui.set_markup(label, ui.span(ui.truncate(tag.name or "?", 2), fg,
         selected and ui.font.mark or ui.font.small))
@@ -217,12 +222,13 @@ local function paint_pill(root, tag, label, tick)
     root.border_width = 0
     tick.visible = occupied or selected
     tick.bg = urgent and ui.color.warn
-        or (selected and ui.color.accent or "#ffffff40")
+        or (selected and ui.color.accent or ui.color.border_soft)
 end
 
 -- Every rendered pill, kept so the dot's wallpaper-derived accent can be
 -- repainted when the wallpaper changes.
 local pills = {}
+local showcases = {}
 
 local function repaint_pills()
     for i = #pills, 1, -1 do
@@ -231,6 +237,14 @@ local function repaint_pills()
             table.remove(pills, i)
         else
             paint_pill(p.root, p.tag, p.label, p.tick)
+        end
+    end
+    for i = #showcases, 1, -1 do
+        local w = showcases[i]
+        if not (w.screen and w.screen.valid) then
+            table.remove(showcases, i)
+        else
+            w.paint()
         end
     end
 end
@@ -300,7 +314,12 @@ end
 
 -------------------------------------------------------------------------- public
 
---- Workspace indicator for a screen.  Returns the taglist widget.
+--- Workspace indicator for a screen.  Returns one row: the dot showcase (a
+--- mode, rendered as its own control) followed by the nine numbered pills.
+--
+-- The dot used to be a peer pill inside the taglist: unlabelled, competing in
+-- the 1–9 numbering space, and its preview read "Workspace ." — a label that
+-- predicted nothing, and a 10th top-level destination (navigation §3.2).
 function M.widget(s)
     local buttons = gears.table.join(
         awful.button({}, 1, function(t) t:view_only() end),
@@ -315,11 +334,7 @@ function M.widget(s)
             end
         end),
         awful.button({}, 3, function(t)
-            local spec = build_actions(t)
-            if spec then
-                spec.id = "ws-actions"
-                popover.show(spec)
-            end
+            open_actions(t)
         end),
         awful.button({}, 4, function() awful.tag.viewnext(s) end),
         awful.button({}, 5, function() awful.tag.viewprev(s) end)
@@ -327,15 +342,160 @@ function M.widget(s)
 
     local taglist = awful.widget.taglist{
         screen  = s,
-        filter  = awful.widget.taglist.filter.all,
+        -- Numbered workspaces only; the dot is the showcase control below.
+        filter  = function(t) return not dotws.is_dot(t) end,
         buttons = buttons,
         layout  = wibox.layout.fixed.horizontal,
         widget_template = tag_template(buttons),
-        style   = { spacing = 2 },
+        style   = { spacing = ui.space.xs },
     }
     taglist.forced_height = PILL_H
-    return taglist
+
+    local showcase = M.showcase(s)
+    if not showcase then return taglist end
+    return wibox.widget{
+        showcase,
+        { taglist, left = ui.space.s, widget = wibox.container.margin },
+        layout = wibox.layout.fixed.horizontal,
+    }
 end
+
+--- The dot showcase as a separate control (navigation §3.2).  Same wallpaper-
+--- derived accent and the same click target as before, but labelled by its
+--- preview and visually apart from the numbered strip.
+function M.showcase(s)
+    local dot = dotws.dot_tag(s)
+    if not dot then return nil end
+    local icon = ui.icon(FA_PICTURE, ui.glyph.m, ui.color.text_dim)
+    local root = wibox.container.background()
+    root.shape = ui.radius_shape.pill
+    root.forced_width = PILL_W
+    root.forced_height = PILL_H
+    root.widget = wibox.container.place(icon)
+    root.border_width = 0
+
+    local entry = { screen = s, root = root, icon = icon }
+    function entry.paint()
+        local tag = dotws.dot_tag(s)
+        if not tag then return end
+        local base = dotws.accent_color
+        local selected = tag.selected
+        ui.set_icon(icon, FA_PICTURE, ui.glyph.m,
+            selected and base or dotws.mix(base, ui.color.text_dim, 0.35))
+        root.bg = selected and (base .. "2e")
+            or (#real_clients(tag) > 0 and ui.color.occupied or ui.color.hover)
+        root.border_width = selected and 1 or 0
+        root.border_color = base .. "55"
+    end
+    entry.paint()
+    showcases[#showcases + 1] = entry
+
+    -- Its own buttons: the taglist's handlers receive a *tag* because the
+    -- taglist passes one, so reusing them here called t:view_only() on the
+    -- widget and the showcase silently did nothing.
+    local function tag()
+        local t = dotws.dot_tag(s)
+        if t and t.valid then return t end
+    end
+    ui.buttons_deep(root, gears.table.join(
+        awful.button({}, 1, function() local t = tag() if t then t:view_only() end end),
+        awful.button({ "Mod4" }, 1, function()
+            local t = tag()
+            if t and client.focus and client.focus.valid then
+                client.focus:move_to_tag(t)
+            end
+        end),
+        awful.button({ "Mod4" }, 3, function()
+            local t = tag()
+            if t and client.focus and client.focus.valid then
+                client.focus:toggle_tag(t)
+            end
+        end),
+        awful.button({}, 3, function() local t = tag() if t then open_actions(t) end end),
+        awful.button({}, 4, function() awful.tag.viewnext(s) end),
+        awful.button({}, 5, function() awful.tag.viewprev(s) end)))
+    popover.hover(root, "ws-preview", function() return build_preview(dot) end)
+    return root
+end
+
+--- Where the other monitor is (navigation N6, flow T3/T9).  The bar showed
+--- only the focused screen's workspace, so the other monitor's state was
+--- invisible without moving focus there.  One chip: screen index, its
+--- selected workspace, and an occupancy dot.  Returns nil with one screen.
+local other_screen_chips = {}
+
+local function paint_other_screen(e)
+    local s = e.screen
+    if not (s and s.valid) then
+        e.root.visible = false
+        return
+    end
+    local other
+    for scr in screen do
+        if scr ~= s and scr.valid then other = scr break end
+    end
+    if not other then
+        e.root.visible = false
+        return
+    end
+    local tag = other.selected_tag
+    local n = 0
+    if tag then
+        for _, c in ipairs(tag:clients()) do
+            if not (c.sticky or c.skip_taskbar) then n = n + 1 end
+        end
+    end
+    local name = tag and (dotws.is_dot(tag) and "showcase" or (tag.name or "?")) or "—"
+    e.root.visible = true
+    ui.set_markup(e.text, string.format(
+        '<span foreground="%s">S%d</span> <span foreground="%s">%s</span>'
+            .. '<span foreground="%s"> %s</span>',
+        ui.color.text_faint, other.index,
+        n > 0 and ui.color.text_dim or ui.color.text_faint, ui.esc(name),
+        n > 0 and ui.color.accent or ui.color.idle_dot,
+        '<span font="' .. ui.glyph_font.s .. '">' .. FA_CIRCLE .. '</span>'))
+end
+
+local function paint_all_other_screens()
+    for i = #other_screen_chips, 1, -1 do
+        local e = other_screen_chips[i]
+        if not (e.screen and e.screen.valid) then
+            table.remove(other_screen_chips, i)
+        else
+            paint_other_screen(e)
+        end
+    end
+end
+
+function M.other_screen(s)
+    local text = ui.text{ font = ui.font.small }
+    local root = wibox.container.background()
+    root.shape = ui.radius_shape.chip
+    root.bg = ui.color.transparent
+    root.forced_height = ui.block_h
+    root.widget = wibox.container.place(
+        ui.pad(text, ui.space.s, ui.space.s, 0, 0))
+
+    local entry = { screen = s, root = root, text = text }
+    other_screen_chips[#other_screen_chips + 1] = entry
+    paint_other_screen(entry)
+
+    ui.hover(root, function() return ui.color.transparent end, ui.color.hover)
+    ui.buttons_deep(root, gears.table.join(awful.button({}, 1, function()
+        for scr in screen do
+            if scr ~= s and scr.valid then awful.screen.focus(scr) break end
+        end
+    end)))
+    return root
+end
+
+client.connect_signal("manage", paint_all_other_screens)
+client.connect_signal("unmanage", paint_all_other_screens)
+client.connect_signal("tagged", paint_all_other_screens)
+client.connect_signal("untagged", paint_all_other_screens)
+tag.connect_signal("property::selected", paint_all_other_screens)
+screen.connect_signal("added", paint_all_other_screens)
+screen.connect_signal("removed", paint_all_other_screens)
 
 --- The focused window's workspace label, used by the window block.
 function M.label_for_client(c)
@@ -346,13 +506,21 @@ end
 --- Compact workspace grid for the expanded panel: 3 columns x 3 rows.
 -- Each cell is [number][occupancy]; click switches, right click opens the
 -- same action surface as the bar's pills.
-function M.panel_rows(s, on_switch)
-    local cells = {}
-    for _, t in ipairs(s.tags) do
-        local n = #t:clients()
+-- Cells are computed from the available width, never hardcoded: three columns of
+-- 120 px plus 6 px gutters needed 372 px inside a 368 px content box and clipped
+-- the third cell (layout-grid G3/G4).  The dot gets its own full-width row — it is
+-- a mode (wallpaper showcase), not a workspace, and as a peer cell it left the
+-- numbered grid with an orphan row (`3,3,3,1`, continuity K2).
+function M.panel_rows(s, on_switch, opts)
+    opts = opts or {}
+    local width  = opts.width or 368
+    local gutter = opts.gutter or ui.space.s
+    local cell_h = 24
+
+    local function cell(t, w, meta_text)
         local chip = ui.chip{
             label = t.name or "?",
-            width = 26, height = 22,
+            width = 26, height = 24,
             active = t.selected,
         }
         chip:buttons(gears.table.join(
@@ -360,27 +528,48 @@ function M.panel_rows(s, on_switch)
                 if on_switch then on_switch(t) else t:view_only() end
             end),
             awful.button({}, 3, function()
-                local spec = build_actions(t)
-                if spec then spec.id = "ws-actions" popover.show(spec) end
+                open_actions(t)
             end)))
-        local meta = ui.text{ font = ui.font.tiny, width = 76 }
-        ui.set_markup(meta, ui.span(n == 0 and "empty" or (n .. (n == 1 and " window" or " windows")),
-            n == 0 and ui.color.text_faint or ui.color.text_dim))
-        cells[#cells + 1] = wibox.widget{
-            { chip, right = 8, widget = wibox.container.margin },
+        local meta = ui.text{ font = ui.font.tiny, width = math.max(40, w - 42) }
+        ui.set_markup(meta, ui.span(meta_text, ui.color.text_faint))
+        return wibox.widget{
+            { chip, right = ui.space.s, widget = wibox.container.margin },
             meta,
             layout = wibox.layout.fixed.horizontal,
-            forced_width = 120,
-            forced_height = 24,
+            forced_width = w,
+            forced_height = cell_h,
         }
     end
 
+    local function count_text(t)
+        local n = 0
+        for _, c in ipairs(t:clients()) do
+            if not (c.sticky or c.skip_taskbar) then n = n + 1 end
+        end
+        if n == 0 then return "empty" end
+        return n .. (n == 1 and " window" or " windows")
+    end
+
     local rows = wibox.layout.fixed.vertical()
-    rows.spacing = 2
-    for i = 1, #cells, 3 do
+    rows.spacing = gutter
+
+    -- Mode row: the dot, full width, labelled for what it is.
+    local dot = dotws.dot_tag(s)
+    if dot then rows:add(cell(dot, width, "wallpaper showcase")) end
+
+    -- Numbered workspaces: three columns, exactly filling the content box.
+    local numbered = {}
+    for i = 1, 9 do
+        local t = dotws.numbered(s, i)
+        if t then numbered[#numbered + 1] = t end
+    end
+    local cell_w = math.max(96, math.floor((width - 2 * gutter) / 3))
+    for i = 1, #numbered, 3 do
         local row = wibox.layout.fixed.horizontal()
-        row.spacing = 6
-        for j = i, math.min(i + 2, #cells) do row:add(cells[j]) end
+        row.spacing = gutter
+        for j = i, math.min(i + 2, #numbered) do
+            row:add(cell(numbered[j], cell_w, count_text(numbered[j])))
+        end
         rows:add(row)
     end
     return rows

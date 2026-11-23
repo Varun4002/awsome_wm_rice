@@ -19,6 +19,11 @@ local awful = require("awful")
 local M = {}
 
 M.bar_height = 38
+-- Every bar cluster is fitted to this height and centred in the 38 px bar, so
+-- all clusters share one vertical centre regardless of their own block height
+-- (continuity K1).  Any height that is not a multiple of 4 is off the grid
+-- (layout-grid G5).
+M.bar_row_h = 24
 
 M.color = {
     text         = "#e9edf3",
@@ -46,20 +51,54 @@ M.color = {
     idle_dot     = "#ffffff26",
     card_bg      = "#ffffff08",
     transparent  = "#00000000",
+    -- Surfaces that only had literal spellings in modules: the bar's own base
+    -- colour (frost fallback / tray background), the window chrome, and the
+    -- unoccupied-but-selected pill tick.
+    bg_bar       = "#0e0e10",
+    border_soft  = "#ffffff40",
 }
 
+-- Type ladder: four steps, 1.25/1.2/1.67 apart.  Hierarchy comes from weight
+-- and colour; the 1 px neighbours this replaces (9/11/13) were invisible at
+-- 96 dpi and made the bar look hand-placed (bar-aesthetic Q4, design-qa C7).
 M.font = {
     tiny    = "Inter Medium 8",
-    small   = "Inter Medium 9",
+    small   = "Inter Medium 10",   -- was 9
     body    = "Inter Medium 10",
     strong  = "Inter SemiBold 10",
-    mark    = "Inter SemiBold 9",
+    mark    = "Inter SemiBold 10", -- was 9
     title   = "Inter SemiBold 12",
-    clock   = "Inter SemiBold 11",
-    display = "Inter SemiBold 20", -- clock detail surface / hero numerals
+    clock   = "Inter SemiBold 12", -- was 11
+    display = "Inter SemiBold 20",
+}
+
+-- Glyph scale: three sizes, each a token.  The old 9 / 12 / 13 / 17 are gone
+-- (bar-aesthetic Q4).
+M.glyph = { s = 8, m = 10, l = 16 }
+-- The same three sizes as Pango font strings, for markup call sites
+-- (`<span font="...">`), so no module spells its own size again.
+M.glyph_font = {
+    s = "FontAwesome " .. M.glyph.s,
+    m = "FontAwesome " .. M.glyph.m,
+    l = "FontAwesome " .. M.glyph.l,
 }
 
 M.radius = { popup = 12, card = 10, chip = 7, pill = 7 }
+
+-- Spacing scale (layout-grid §3.1): 4 px base unit, 2 px only for hairline
+-- optical offsets (a tick, a rule's padding).  `M.gap` was defined and never
+-- read; every new spacing must come from here.
+M.space = { xxs = 2, xs = 4, s = 8, m = 12, l = 16, xl = 24, xxl = 32 }
+
+-- Motion scale. Every animation duration in the config reads from here so
+-- all surfaces move at the same pace; adding a surface must not invent a
+-- new timing. fast = dismissals, base = entrances and reveals,
+-- slow = large surfaces settling.
+M.motion = {
+    fast = 0.10,
+    base = 0.14,
+    slow = 0.20,
+}
 
 -- Drop-in shape functions bound to the radius tokens: `widget.shape =
 -- ui.radius_shape.chip` instead of a bare rounded_rect, which silently
@@ -71,8 +110,7 @@ for rname, rval in pairs(M.radius) do
     end
 end
 
-M.gap    = 6
-M.block_h = 28 -- height of a bar block (clock, window, ...) inside the 38 px bar
+M.block_h = 28 -- height of a bar block (clock, window, ...): fits two text lines in the 38 px bar
 
 local FA = "FontAwesome "
 
@@ -119,7 +157,11 @@ end
 
 function M.icon(glyph, size, fg)
     local tb = wibox.widget.textbox()
-    tb.font = FA .. (size or 11)
+    -- awesome 4.3 textboxes default to ellipsize="end": a glyph wider than its
+    -- cell is silently replaced by "…" (a 16 px sliders glyph in a 16 px cell
+    -- rendered as three dots).  An icon is never ellipsized — clip instead.
+    tb.ellipsize = "none"
+    tb.font = FA .. (size or M.glyph.m)
     tb.valign = "center"
     tb.align = "center"
     set_markup(tb, string.format('<span foreground="%s">%s</span>',
@@ -128,7 +170,8 @@ function M.icon(glyph, size, fg)
 end
 
 function M.set_icon(tb, glyph, size, fg)
-    tb.font = FA .. (size or 11)
+    tb.ellipsize = "none"
+    tb.font = FA .. (size or M.glyph.m)
     set_markup(tb, string.format('<span foreground="%s">%s</span>',
         fg or M.color.text_dim, glyph))
 end
@@ -145,6 +188,25 @@ function M.first_letter(s)
     local ok, cp = pcall(utf8.codepoint, s or "", 1)
     if not ok or not cp then return "?" end
     return utf8.char(cp):upper()
+end
+
+--- Attach one button table to a widget and every widget under it.
+-- A click is dispatched to the leaf widget under the pointer, so handlers put
+-- only on a container are dead as soon as a child (icon, label, placed cell)
+-- covers it — the showcase control silently did nothing for exactly that
+-- reason.  Use this for any container whose area is filled by children.
+function M.buttons_deep(widget, buttons)
+    local base = require("wibox.widget.base")
+    local function walk(w)
+        if not w then return end
+        if w.buttons then pcall(w.buttons, w, buttons) end
+        local ok, kids = pcall(base.get_children, w)
+        if ok and kids then
+            for _, child in ipairs(kids) do walk(child) end
+        end
+    end
+    walk(widget)
+    return widget
 end
 
 --- Vertically centred cell for a composite widget (icon stacks, chips).
@@ -302,6 +364,15 @@ function M.chip(args)
 
     M.hover(root, base_bg, hover_bg)
 
+    -- Pressed state (design-qa S3): the button signals "registered" before the
+    -- action runs, using the same active tint the rest of the system uses.
+    root:connect_signal("button::press", function()
+        if state.enabled then root.bg = M.color.active end
+    end)
+    root:connect_signal("button::release", function()
+        root.bg = base_bg()
+    end)
+
     if args.onclick then
         root:buttons(gears.table.join(awful.button({}, 1, function()
             if state.enabled then args.onclick(root) end
@@ -398,8 +469,14 @@ end
 -------------------------------------------------------------------------- surfaces
 
 -- Internal padding of a popover body.  The popup itself draws bg/border.
+-- Surface padding: one pair of constants for every layer, symmetric top/bottom
+-- (was 14/14 horizontal and 12/13 vertical — off-scale and asymmetric, grid G2).
+M.surface_pad_h = 16
+M.surface_pad_v = 12
+
 function M.surface(content, width)
-    local box = M.pad(content, 14, 14, 12, 13)
+    local box = M.pad(content, M.surface_pad_h, M.surface_pad_h,
+                              M.surface_pad_v, M.surface_pad_v)
     if width then box.forced_width = width end
     return box
 end
@@ -408,8 +485,10 @@ function M.section(title, opts)
     opts = opts or {}
     local tb = M.text{ font = M.font.tiny }
     set_markup(tb, M.span(title:upper(), M.color.text_faint, M.font.tiny))
+    -- No inset: the heading sits on the same leading axis as the rows below
+    -- it, so the eye follows one line down a surface (continuity K3).
     local row = wibox.widget{
-        { tb, left = 2, widget = wibox.container.margin },
+        { tb, widget = wibox.container.margin },
         layout = wibox.layout.align.horizontal,
     }
     if opts.spacing_before then
@@ -435,7 +514,7 @@ function M.key_value(key, value, opts)
         v,
         layout = wibox.layout.align.horizontal,
     }
-    row.forced_height = opts.height or 18
+    row.forced_height = opts.height or 20
     return row
 end
 
@@ -624,7 +703,7 @@ function M.calendar(year, month, cell_width)
     for i, name in ipairs(WEEKDAYS) do
         local tb = M.text{ font = M.font.tiny, align = "center" }
         set_markup(tb, M.span(name, M.color.text_faint, M.font.tiny))
-        cols[i] = { tb, forced_width = cell_width, forced_height = 18,
+        cols[i] = { tb, forced_width = cell_width, forced_height = 20,
                     widget = wibox.container.place }
     end
     local grid = { layout = wibox.layout.fixed.vertical, spacing = 2 }
@@ -642,7 +721,7 @@ function M.calendar(year, month, cell_width)
     local col = offset
     for _ = 1, offset do
         row[#row + 1] = { M.spacer(1, 1), forced_width = cell_width,
-                          forced_height = 22, widget = wibox.container.place }
+                          forced_height = 24, widget = wibox.container.place }
     end
     for day = 1, total do
         local tb = M.text{ font = M.font.small, align = "center" }
@@ -651,12 +730,12 @@ function M.calendar(year, month, cell_width)
             row[#row + 1] = {
                 { tb, widget = wibox.container.place },
                 bg = M.color.accent_bg, shape = M.radius_shape.chip,
-                forced_width = cell_width, forced_height = 22,
+                forced_width = cell_width, forced_height = 24,
                 widget = wibox.container.background,
             }
         else
             set_markup(tb, M.span(tostring(day), M.color.text_dim, M.font.small))
-            row[#row + 1] = { tb, forced_width = cell_width, forced_height = 22,
+            row[#row + 1] = { tb, forced_width = cell_width, forced_height = 24,
                               widget = wibox.container.place }
         end
         col = col + 1
@@ -706,6 +785,19 @@ function M.time12(now)
     local h = t.hour % 12
     if h == 0 then h = 12 end
     return string.format("%d:%02d %s", h, t.min, t.hour < 12 and "AM" or "PM")
+end
+
+--- One composition policy for every bar width (layout-grid G7 / A2).
+-- Beyond truncation, this is the only place that decides what a narrower bar
+-- drops, so the 1920 panel and the 1680 monitor cannot drift apart.
+function M.bar_budget(width)
+    width = width or 1920
+    if width >= 1800 then
+        return { song = 26, project = true, project_chars = 14, date = true }
+    elseif width >= 1600 then
+        return { song = 18, project = false, project_chars = 0, date = true }
+    end
+    return { song = 0, project = false, project_chars = 0, date = false }
 end
 
 --- Home-relative path ("~/projects/aether").

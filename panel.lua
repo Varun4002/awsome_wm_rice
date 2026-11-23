@@ -21,6 +21,7 @@ local wibox = require("wibox")
 local ui          = require("ui")
 local popover     = require("popover")
 local workspaces  = require("workspaces")
+local opencode    = require("opencode")
 local opencode_ui = require("opencode_ui")
 local clock       = require("clock")
 
@@ -50,8 +51,9 @@ end
 
 local function system_rows(data)
     local d = data or {}
+    local loading = data == nil
     local rows = wibox.layout.fixed.vertical()
-    rows.spacing = 1
+    rows.spacing = 0
 
     local wifi_on = d.W and d.W:find("enabled") ~= nil
     local wifi = "unavailable"
@@ -76,11 +78,16 @@ local function system_rows(data)
         end
     end
 
+    -- S1: before the probe returns, a row says it is being read.  "unavailable"
+    -- is an answer, not a loading state, and the panel used to show it for the
+    -- first ~200 ms of every open.
     local function row(key, value, unavailable)
+        if loading then value = "checking…" end
         return ui.key_value(key, value, {
-            fg = unavailable and ui.color.text_faint or ui.color.text_dim,
+            fg = (loading or unavailable) and ui.color.text_faint
+                 or ui.color.text_dim,
             key_width = 86,
-            height = 18,
+            height = 20,
         })
     end
     rows:add(row("Wi-Fi", wifi, wifi == "unavailable"))
@@ -115,7 +122,7 @@ local function window_rows(on_pick)
     end)
 
     local list = wibox.layout.fixed.vertical()
-    list.spacing = 1
+    list.spacing = ui.space.xs
     local shown = 0
     for _, c in ipairs(clients) do
         if shown >= 4 then break end
@@ -135,17 +142,19 @@ local function window_rows(on_pick)
         row.shape = ui.radius_shape.card
         row.bg = focused and ui.color.occupied or ui.color.transparent
         row.forced_height = 24
-        row.widget = ui.pad(wibox.widget{
+        -- No inner inset: the row starts on the surface's content axis, like
+        -- the section heading above it (continuity K3).
+        row.widget = wibox.widget{
             wibox.widget{
-                { dot, left = 2, right = 8, widget = wibox.container.margin },
-                ui.cell(ui.app_icon(c, 14)),
-                { title, left = 8, widget = wibox.container.margin },
+                { dot, right = ui.space.s, widget = wibox.container.margin },
+                ui.cell(ui.app_icon(c, 16)),
+                { title, left = ui.space.s, widget = wibox.container.margin },
                 layout = wibox.layout.fixed.horizontal,
             },
             nil,
             meta,
             layout = wibox.layout.align.horizontal,
-        }, 4, 4, 0, 0)
+        }
         ui.hover(row, function()
             return focused and ui.color.occupied or ui.color.transparent
         end, ui.color.hover)
@@ -171,7 +180,11 @@ end
 local function build(s)
     local alive = true
     local root = wibox.layout.fixed.vertical()
-    root.spacing = 8
+    -- Two interruption magnitudes only (continuity K4): 4 px inside a section
+    -- (heading → content, row → row) and 12 px above every section heading.
+    -- The single divider that used to separate the header from OpenCode read
+    -- as a stronger boundary than five section breaks.
+    root.spacing = ui.space.xs
 
     -- header -------------------------------------------------------------
     local mark = ui.text{ font = ui.font.title }
@@ -179,10 +192,13 @@ local function build(s)
     local time = ui.text{ font = ui.font.strong, align = "right", width = 140 }
     local date = ui.text{ font = ui.font.tiny, align = "right", width = 140 }
     local detach_clock = clock.attach(time, date)
+    -- Pending work is the one thing on this surface that asks for an action,
+    -- so it sits in the header: attention first, orientation below.
+    local pending = ui.text{ font = ui.font.small, align = "center" }
 
     root:add(wibox.widget{
         mark,
-        nil,
+        pending,
         wibox.widget{
             time, date,
             layout = wibox.layout.fixed.vertical,
@@ -190,30 +206,29 @@ local function build(s)
         },
         layout = wibox.layout.align.horizontal,
     })
-    root:add(ui.divider())
-
-    -- OpenCode -----------------------------------------------------------
-    root:add(ui.section("OpenCode"))
-    local oc_section = opencode_ui.panel_section(function() M.close() end)
-    root:add(oc_section)
-
-    -- Windows ------------------------------------------------------------
-    root:add(ui.section("Windows", { spacing_before = 2 }))
-    local windows_holder = wibox.container.background()
-    windows_holder.widget = window_rows(function() M.close() end)
-    root:add(windows_holder)
 
     -- Workspaces ---------------------------------------------------------
-    root:add(ui.section("Workspaces", { spacing_before = 2 }))
+    root:add(ui.section("Workspaces", { spacing_before = ui.space.m }))
     local ws_holder = wibox.container.background()
     ws_holder.widget = workspaces.panel_rows(s, function(tag)
         tag:view_only()
         M.close()
-    end)
+    end, { width = WIDTH - 2 * ui.surface_pad_h })
     root:add(ws_holder)
 
+    -- Windows ------------------------------------------------------------
+    root:add(ui.section("Windows", { spacing_before = ui.space.m }))
+    local windows_holder = wibox.container.background()
+    windows_holder.widget = window_rows(function() M.close() end)
+    root:add(windows_holder)
+
+    -- OpenCode -----------------------------------------------------------
+    root:add(ui.section("OpenCode", { spacing_before = ui.space.m }))
+    local oc_section = opencode_ui.panel_section(function() M.close() end)
+    root:add(oc_section)
+
     -- System -------------------------------------------------------------
-    root:add(ui.section("System", { spacing_before = 2 }))
+    root:add(ui.section("System", { spacing_before = ui.space.m }))
     local sys_holder = wibox.container.background()
     sys_holder.widget = system_rows(nil)
     root:add(sys_holder)
@@ -230,7 +245,7 @@ local function build(s)
 
     -- Time ---------------------------------------------------------------
     local now = os.date("*t")
-    root:add(ui.section("Time", { spacing_before = 2 }))
+    root:add(ui.section("Time", { spacing_before = ui.space.m }))
     local month = ui.text{ font = ui.font.strong }
     ui.set_text(month, ui.month_title(now.year, now.month), ui.color.text_dim,
         ui.font.strong)
@@ -242,6 +257,23 @@ local function build(s)
     read_system(function(data)
         if alive then sys_holder.widget = system_rows(data) end
     end)
+
+    ---------------------------------------------------------------- refresh
+    local ws_sig, win_sig, pending_n
+    local function paint_pending()
+        local st = opencode.state
+        local n = st.pending and st.pending.total or 0
+        if n == pending_n then return end
+        pending_n = n
+        if n > 0 then
+            ui.set_markup(pending, ui.span(string.format("! %d pending", n),
+                                          ui.color.warn, ui.font.small))
+        else
+            ui.set_markup(pending, "")
+        end
+    end
+    paint_pending()
+    local detach_pending = opencode.subscribe(paint_pending)
 
     ---------------------------------------------------------------- refresh
     local ws_sig, win_sig
@@ -263,7 +295,7 @@ local function build(s)
             ws_holder.widget = workspaces.panel_rows(s, function(tag)
                 tag:view_only()
                 M.close()
-            end)
+            end, { width = WIDTH - 2 * ui.surface_pad_h })
         end
     end
 
@@ -288,6 +320,7 @@ local function build(s)
     local function dispose()
         alive = false
         detach_clock()
+        if detach_pending then detach_pending() end
         for _, w in ipairs(watched) do
             client.disconnect_signal(w[1], w[2])
         end
@@ -305,12 +338,11 @@ function M.close()
     popover.close("panel")
 end
 
-function M.toggle()
-    if popover.is_open("panel") then
-        M.close()
-        return
-    end
-    local s = mouse.screen or awful.screen.focused()
+--- Open the panel (idempotent).  A named opener rather than only a toggle:
+-- the popover back-stack rebuilds a previous surface through its opener
+-- (navigation N8), and `toggle` must stay a toggle for the click target.
+function M.open(s)
+    s = s or mouse.screen or awful.screen.focused()
     if not s then return end
     local content, dispose = build(s)
     popover.show{
@@ -319,8 +351,17 @@ function M.toggle()
         width = WIDTH,
         modal = true,
         screen = s,
+        reopen = function() M.open(s) end,
         on_close = function() dispose() end,
     }
+end
+
+function M.toggle()
+    if popover.is_open("panel") then
+        M.close()
+        return
+    end
+    M.open()
 end
 
 return M
